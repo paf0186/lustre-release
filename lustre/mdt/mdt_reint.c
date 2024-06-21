@@ -2716,6 +2716,34 @@ static int mdt_lock_two_dirs(struct mdt_thread_info *info,
 	return rc;
 }
 
+static int mdt_rename_target_lock(struct mdt_thread_info *info,
+				  struct mdt_object *parent,
+				  struct mdt_object *child,
+				  struct mdt_lock_handle *lh,
+				  bool cos_incompat)
+{
+	enum mds_ibits_locks ibits;
+	int rc;
+
+	mdt_lock_reg_init(lh, LCK_EX);
+	ibits = MDS_INODELOCK_LOOKUP | MDS_INODELOCK_UPDATE;
+	if (mdt_object_remote(parent)) {
+		rc = mdt_remote_object_lock(info, parent, mdt_object_fid(child),
+					    &lh->mlh_rreg_lh, lh->mlh_rreg_mode,
+					    MDS_INODELOCK_LOOKUP, false);
+		if (rc)
+			return rc;
+
+		ibits &= ~MDS_INODELOCK_LOOKUP;
+	}
+
+	rc = mdt_reint_object_lock(info, child, lh, ibits, cos_incompat);
+	if (rc && !(ibits & MDS_INODELOCK_LOOKUP))
+		mdt_object_unlock(info, NULL, lh, 1);
+
+	return rc;
+}
+
 /*
  * VBR: rename versions in reply: 0 - srcdir parent; 1 - tgtdir parent;
  * 2 - srcdir child; 3 - tgtdir child.
@@ -2926,6 +2954,8 @@ relock:
 	rc = mdt_lookup_version_check(info, mtgtdir, &rr->rr_tgt_name, new_fid,
 				      3);
 	if (rc == 0) {
+		bool child_reverse_lock = false;
+
 		/* the new_fid should have been filled at this moment */
 		if (lu_fid_eq(old_fid, new_fid))
 			GOTO(out_put_old, rc);
@@ -2973,10 +3003,25 @@ relock:
 		mdt_lock_reg_init(lh_oldp, LCK_EX);
 		mdt_lock_reg_init(lh_rmt, LCK_EX);
 		lock_ibits = MDS_INODELOCK_LOOKUP | MDS_INODELOCK_XATTR;
+		lh_newp = &info->mti_lh[MDT_LH_NEW];
+
+		/* We will lock in child fid order here to avoid a
+		 * deadlock related to hardlinks thats only possible with
+		 * regular files. LU-15491
+		 */
+		if (!S_ISDIR(lu_object_attr(&mold->mot_obj)) &&
+		    lu_fid_cmp(old_fid, new_fid) > 0) {
+			child_reverse_lock = true;
+			rc = mdt_rename_target_lock(info, mtgtdir, mnew,
+						    lh_newp, cos_incompat);
+			if (rc < 0)
+				GOTO(out_unlock_new, rc);
+		}
+
 		rc = mdt_rename_source_lock(info, msrcdir, mold, lh_oldp,
 					    lh_rmt, lock_ibits, cos_incompat);
 		if (rc < 0)
-			GOTO(out_put_new, rc);
+			GOTO(out_unlock_new, rc);
 
 		/* hold between the two child locks */
 		CFS_FAIL_TIMEOUT(OBD_FAIL_MDS_RENAME_CHILD_DELAY, 20);
@@ -2990,7 +3035,7 @@ relock:
 			if (rc) {
 				if (rc == 1)
 					rc = -EINVAL;
-				GOTO(out_unlock_old, rc);
+				GOTO(out_unlock_new, rc);
 			}
 		}
 
@@ -3000,25 +3045,12 @@ relock:
 		 * lock. See LU-4002.
 		 */
 
-		lh_newp = &info->mti_lh[MDT_LH_NEW];
-		mdt_lock_reg_init(lh_newp, LCK_EX);
-		lock_ibits = MDS_INODELOCK_LOOKUP | MDS_INODELOCK_UPDATE;
-		if (mdt_object_remote(mtgtdir)) {
-			rc = mdt_remote_object_lock(info, mtgtdir,
-						    mdt_object_fid(mnew),
-						    &lh_newp->mlh_rreg_lh,
-						    lh_newp->mlh_rreg_mode,
-						    MDS_INODELOCK_LOOKUP,
-						    false);
-			if (rc != ELDLM_OK)
-				GOTO(out_unlock_old, rc);
-
-			lock_ibits &= ~MDS_INODELOCK_LOOKUP;
+		if (!child_reverse_lock) {
+			rc = mdt_rename_target_lock(info, mtgtdir, mnew,
+						    lh_newp, cos_incompat);
+			if (rc != 0)
+				GOTO(out_unlock_new, rc);
 		}
-		rc = mdt_reint_object_lock(info, mnew, lh_newp, lock_ibits,
-					   cos_incompat);
-		if (rc != 0)
-			GOTO(out_unlock_new, rc);
 
 		/* get and save version after locking */
 		mdt_version_get_save(info, mnew, 3);
@@ -3071,8 +3103,9 @@ relock:
 	EXIT;
 out_unlock_new:
 	if (mnew != NULL)
-		mdt_object_unlock(info, mnew, lh_newp, rc);
-out_unlock_old:
+		/* mnew is gone, no need to keep lock */
+		mdt_object_unlock(info, mnew, lh_newp, 1);
+
 	mdt_object_unlock(info, NULL, lh_rmt, rc);
 	mdt_object_unlock(info, mold, lh_oldp, rc);
 out_put_new:
