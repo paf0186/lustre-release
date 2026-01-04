@@ -1,0 +1,85 @@
+#!/bin/bash
+#
+# A hook script to regenerate Markdown files from DocBook XML sources
+# when manual documentation is modified.
+#
+# Called by git-commit before the commit is finalized.
+# The hook should exit with non-zero status after issuing an appropriate
+# message if it wants to stop the commit.
+#
+# Should be installed as .git/hooks/pre-commit.
+#
+
+set -e
+
+# Directory containing the manual sources
+MANUAL_DIR="docs/manual"
+MARKDOWN_DIR="$MANUAL_DIR/markdown"
+
+# Check if any DocBook XML files in docs/manual/ are staged for commit
+staged_xml_files=$(git diff --cached --name-only --diff-filter=ACMR -- "$MANUAL_DIR/*.xml" 2>/dev/null || true)
+
+# If no manual XML files are staged, exit successfully (nothing to do)
+if [ -z "$staged_xml_files" ]; then
+    exit 0
+fi
+
+echo "Detected staged manual XML files, regenerating Markdown..."
+
+# Check if pandoc is installed
+if ! command -v pandoc &> /dev/null; then
+    echo "ERROR: pandoc is required to modify the Lustre manual." >&2
+    echo "" >&2
+    echo "The manual source files (docs/manual/*.xml) have been modified," >&2
+    echo "but pandoc is not installed. Pandoc is needed to regenerate the" >&2
+    echo "Markdown version of the manual that is committed to the repository." >&2
+    echo "" >&2
+    echo "Please install pandoc:" >&2
+    echo "  Debian/Ubuntu: sudo apt-get install pandoc" >&2
+    echo "  RHEL/CentOS:   sudo dnf install pandoc" >&2
+    echo "  macOS:         brew install pandoc" >&2
+    echo "" >&2
+    echo "Then retry your commit." >&2
+    exit 1
+fi
+
+# Create markdown directory if it doesn't exist
+mkdir -p "$MARKDOWN_DIR"
+
+# Track if any conversion failed
+conversion_failed=0
+
+# Process each staged XML file
+for xml_file in $staged_xml_files; do
+    # Skip non-chapter files (index.xml, part files, etc.)
+    basename=$(basename "$xml_file" .xml)
+
+    # Skip files that aren't standalone chapters
+    case "$basename" in
+        index|ix|Revision|I_*|II_*|III_*|IV_*|V_*|VI_*|legalnotice*)
+            continue
+            ;;
+    esac
+
+    md_file="$MARKDOWN_DIR/${basename}.md"
+
+    echo "  Converting $xml_file -> $md_file"
+
+    if ! pandoc -f docbook -t markdown -o "$md_file" "$xml_file" 2>/dev/null; then
+        echo "ERROR: Failed to convert $xml_file to Markdown" >&2
+        conversion_failed=1
+        continue
+    fi
+
+    # Stage the regenerated markdown file
+    git add "$md_file"
+done
+
+if [ $conversion_failed -ne 0 ]; then
+    echo "" >&2
+    echo "ERROR: Some Markdown conversions failed." >&2
+    exit 1
+fi
+
+echo "Markdown regeneration complete."
+exit 0
