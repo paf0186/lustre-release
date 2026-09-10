@@ -874,10 +874,11 @@ test_16l() {
 		error "(1) dd failed writing to file=$file2"
 	rm -f $file1
 
-	# a run of operations on one mount before switching to the other
+	# a run of operations on one mount before switching to the other,
+	# dropping the client cache along the way so reads go to the server
 	$LFS setstripe -c -1 $file1
 	$FSX -c 50 -p $FSXP -N $FSXNUM -l $((SIZE * 256)) -S 0 -I burst \
-		$file1 $file2 || error "(2) fsx with burst failed"
+		-Q 20 $file1 $file2 || error "(2) fsx with burst failed"
 	rm -f $file1
 
 	# burst:1 switches every operation, and -n removes the size check
@@ -887,7 +888,7 @@ test_16l() {
 		$file1 $file2 || error "(3) fsx with burst:1 failed"
 	rm -f $file1
 }
-run_test 16l "dual-mount fsx bursting operations on each mount"
+run_test 16l "dual-mount fsx bursting operations and dropping cache"
 
 test_17() { # bug 3513, 3667
 	remote_ost_nodsh && skip "remote OST with nodsh" && return

@@ -113,6 +113,7 @@ struct log_entry {
 	int args[3];
 	struct timeval tv;
 	const struct test_file *tf;
+	unsigned long testcalls;
 };
 
 #define	LOGSIZE	100000
@@ -156,6 +157,7 @@ char *mirror_op_str[] = {
 };
 
 #define OP_SKIPPED 101
+#define OP_DROPCACHE 102
 #define OP_DIRECT O_DIRECT
 
 #ifndef FALLOC_FL_PUNCH_HOLE
@@ -186,6 +188,7 @@ unsigned long testcalls; /* calls to function "test" */
 
 long simulatedopcount;			/* -b flag */
 int closeprob;				/* -c flag */
+int cacheprob;				/* -Q flag */
 int debug ;				/* -d flag */
 long debugstart;			/* -D flag */
 int flush;				/* -f flag */
@@ -282,6 +285,7 @@ log4(int operation, int arg0, int arg1, int arg2)
 	le->args[0] = arg0;
 	le->args[1] = arg1;
 	le->args[2] = arg2;
+	le->testcalls = testcalls;
 	gettimeofday(&tv, NULL);
 	le->tv = tv;
 	le->tf = tf;
@@ -326,11 +330,9 @@ logdump(void)
 		count = LOGSIZE;
 	}
 	for ( ; count > 0; count--) {
-		int opnum;
-
-		opnum = i + 1 + (logcount / LOGSIZE) * LOGSIZE;
 		lp = &oplog[i];
-		prt("%d%s: %lu.%06u ", opnum, fill_tf_buf(lp->tf),
+		/* not the entry count: a drop logs an extra entry */
+		prt("%lu%s: %lu.%06u ", lp->testcalls, fill_tf_buf(lp->tf),
 		    lp->tv.tv_sec, (int)lp->tv.tv_usec);
 
 		switch (lp->operation) {
@@ -425,6 +427,9 @@ logdump(void)
 		}
 		case OP_SKIPPED:
 			prt("SKIPPED (no operation)");
+			break;
+		case OP_DROPCACHE:
+			prt("DROPPED CACHE (%d ldlm namespaces)", lp->args[0]);
 			break;
 		default:
 			prt("BOGUS LOG ENTRY (operation code = %d)!",
@@ -825,6 +830,98 @@ doflush(unsigned int offset, unsigned int size)
 		report_failure(204);
 	}
 	output_debug(offset, size, "flush done");
+}
+
+/*
+ * Cancel the unused DLM locks, dropping the pages they covered, so the next
+ * operation has to talk to the server.  Only client (osc and mdc) namespaces
+ * have an LRU to clear, and this covers every file on the filesystem under
+ * test, not just this one.
+ */
+static int
+drop_client_caches(void)
+{
+	static const char clear[] = "clear";
+	static glob_t paths;
+	static int paths_valid;
+	char fsname[MAX_OBD_NAME + 1] = { 0 };
+	char pattern[PATH_MAX];
+	struct test_file *tfp;
+	int saved_errno = 0;
+	int failed = 0;
+	int cleared = 0;
+	size_t i;
+	int rc;
+
+	/*
+	 * Required: clearing the lru does not reliably drop the cache with
+	 * dirty pages still around.  syncfs() rather than sync(), which would
+	 * also sync co-located server backends.
+	 */
+	for (i = 0, tfp = test_files; i < (size_t)num_test_files; i++, tfp++) {
+		if (syncfs(tfp->fd)) {
+			prterr("syncfs");
+			report_failure(206);
+		}
+	}
+
+	if (!paths_valid) {
+		rc = llapi_search_fsname(test_files[0].path, fsname);
+		if (rc != 0) {
+			prt("%s is not on Lustre (%s), cannot drop caches\n",
+			    test_files[0].path, strerror(-rc));
+			return -1;
+		}
+
+		snprintf(pattern, sizeof(pattern),
+			 "ldlm/namespaces/%s-*{osc,mdc}*/lru_size", fsname);
+
+		rc = llapi_param_get_paths(pattern, &paths, 0);
+		if (rc != 0) {
+			prt("no lru_size params (%s), cannot drop caches\n",
+			    strerror(-rc));
+			return -1;
+		}
+		paths_valid = 1;
+	}
+
+	for (i = 0; i < paths.gl_pathc; i++) {
+		int fd = open(paths.gl_pathv[i], O_WRONLY);
+
+		if (fd < 0) {
+			saved_errno = errno;
+			failed++;
+			continue;
+		}
+		if (write(fd, clear, sizeof(clear) - 1) > 0) {
+			cleared++;
+		} else {
+			saved_errno = errno;
+			failed++;
+		}
+		close(fd);
+	}
+
+	/* a partial drop is a failed drop */
+	if (failed) {
+		prt("cannot clear %d of %zu ldlm lru (%s)\n", failed,
+		    paths.gl_pathc, strerror(saved_errno));
+		return -1;
+	}
+
+	if (cleared == 0) {
+		prt("no ldlm lru_size params to clear\n");
+		return -1;
+	}
+
+	log4(OP_DROPCACHE, cleared, 0, 0);
+
+	if (!quiet && (debug || (progressinterval &&
+				 testcalls % progressinterval == 0)))
+		prt("%06lu %lu.%06u %-10s %d ldlm namespaces\n", testcalls,
+		    tv.tv_sec, (int)tv.tv_usec, "dropcache", cleared);
+
+	return 0;
 }
 
 static void
@@ -1552,6 +1649,7 @@ test(void)
 	unsigned long rv = random();
 	unsigned long op;
 	int closeopen = 0;
+	int dropcache = 0;
 
 	if (simulatedopcount > 0 && testcalls == simulatedopcount)
 		writefileimage();
@@ -1560,6 +1658,9 @@ test(void)
 
 	if (closeprob)
 		closeopen = (rv >> 3) < (1 << 28) / closeprob;
+
+	if (cacheprob)
+		dropcache = (random() % cacheprob) == 0;
 
 	if (debugstart > 0 && testcalls >= debugstart)
 		debug = 1;
@@ -1576,6 +1677,17 @@ test(void)
 		op = rv % OP_MAX_LITE;
 	else
 		op = rv % OP_MAX_FULL;
+
+	if (dropcache && testcalls > simulatedopcount) {
+		struct test_file *was = tf;
+
+		/* log4() records the global tf; a drop is not tied to a path */
+		tf = test_files;
+		/* the probe passed, so losing drops now is a real failure */
+		if (drop_client_caches())
+			report_failure(207);
+		tf = was;
+	}
 
 	switch (op) {
 	case OP_MAPREAD:
@@ -1687,7 +1799,7 @@ static void
 usage(void)
 {
 	fprintf(stdout,
-		"usage: fsx [-dfnqFLOW] [-b opnum] [-c Prob] [-l flen] [-m start:end] [-o oplen] [-p progressinterval] [-r readbdy] [-s style] [-t truncbdy] [-w writebdy] [-D startingop] [ -I random|rotate|burst[:maxops] ] [-N numops] [-P dirpath] [-S seed] [-Z [prob]] fname [additional paths to fname..]\n"
+		"usage: fsx [-dfnqFLOW] [-b opnum] [-c Prob] [-l flen] [-m start:end] [-o oplen] [-p progressinterval] [-r readbdy] [-s style] [-t truncbdy] [-w writebdy] [-D startingop] [ -I random|rotate|burst[:maxops] ] [-N numops] [-P dirpath] [-Q Prob] [-S seed] [-Z [prob]] fname [additional paths to fname..]\n"
 "	-b opnum: beginning operation number (default 1)\n"
 "	-c P: 1 in P chance of file close+open at each op (default infinity)\n"
 "	-d: debug output for all operations [-d -d = more debugging]\n"
@@ -1737,6 +1849,9 @@ usage(void)
 "	-N numops: total # operations to do (default infinity)\n"
 "	-O: use oplen (see -o flag) for every op (default random)\n"
 "	-P: save .fsxlog and .fsxgood files in dirpath (default ./)\n"
+"	-Q P: 1 in P chance of dropping all client cache before each op.\n"
+"	    Writes back dirty data and cancels unused DLM locks, forcing the\n"
+"	    next op to the server.  Needs root.  (default never)\n"
 "	-R: read() system calls only (mapped reads disabled)\n"
 "	-S seed: for random # generator (default 1) 0 gets timestamp\n"
 /* OSX: -T datasize: atomic data element write size [1,2,4] (default 4)\n\ */
@@ -1808,6 +1923,7 @@ test_fallocate(int mode)
 int
 main(int argc, char **argv)
 {
+	const char *opts = "b:c:dfl:m:no:p:qr:s:t:w:xyzD:FHI:LMN:OP:Q:RS:WZ::";
 	int i, style, ch;
 	char *endp;
 	int dirpath = 0;
@@ -1820,9 +1936,7 @@ main(int argc, char **argv)
 
 	setvbuf(stdout, (char *)0, _IOLBF, 0); /* line buffered stdout */
 
-	while ((ch = getopt(argc, argv,
-			    "b:c:dfl:m:no:p:qr:s:t:w:xyzD:FHI:LMN:OP:RS:WZ::"))
-	       != EOF)
+	while ((ch = getopt(argc, argv, opts)) != EOF)
 		switch (ch) {
 		case 'b':
 			simulatedopcount = getnum(optarg, &endp);
@@ -1942,6 +2056,15 @@ main(int argc, char **argv)
 			strncat(logfile, "/", PATH_MAX - strlen(logfile) - 1);
 			dirpath = 1;
 			break;
+		case 'Q':
+			cacheprob = getnum(optarg, &endp);
+			if (!quiet)
+				fprintf(stdout,
+					"Chance of cache drop is 1 in %d\n",
+					cacheprob);
+			if (cacheprob <= 0)
+				usage();
+			break;
 		case 'R':
 			mapped_reads = 0;
 			break;
@@ -2007,6 +2130,17 @@ main(int argc, char **argv)
 		prterr(logfile);
 		exit(93);
 	}
+
+	/* prove -Q works before any operations run */
+	if (cacheprob) {
+		/* log4() records the global tf, which no operation has set */
+		tf = test_files;
+		if (drop_client_caches()) {
+			prt("-Q given but cache drops are unavailable\n");
+			exit(89);
+		}
+	}
+
 	if (lite) {
 		off_t ret;
 		int fd = get_fd();
