@@ -156,7 +156,10 @@ Divergences left open (details in each header):
   client-side ldlm_cli_inodebits_convert.
 - `osc_extent_model`: the LU-4852 fix (28de66844b, the
   oe_trunc_pending guard in osc_extent_wait) exists only on b2_5;
-  master matches the InjectBug4852 = TRUE variant.
+  master matches the InjectBug4852 = TRUE variant.  A concurrent
+  fsync can still reach the assertion by a second path that the
+  b2_5 fix does not guard; traced in
+  lu4852_truncate_fsync_analysis.md.
 - `dio_bio_deadlock`, `dio_bio_deadlock_eviction`: the reserved-slot
   fix has no code counterpart; the landed LU-19427 fix was reverted
   and the ticket reopened.  The eviction extension's premise (ASTs

@@ -92,7 +92,8 @@
  *
  * Validated against: lustre-release master 47638add78 (2026-09-06)
  * Validation notes:
- *   - DISCREPANCY-OPEN (LU-4852): the fix commit 28de66844b ("LU-4852
+ *   - DISCREPANCY-OPEN (LU-4852): full trace in
+ *     lu4852_truncate_fsync_analysis.md.  The fix commit 28de66844b ("LU-4852
  *     osc: osc_extent_truncate()) ASSERTION( !ext->oe_urgent )
  *     failed", review 10204) adds "&& !ext->oe_trunc_pending" to the
  *     kick guard in osc_extent_wait.  It exists only on origin/b2_5
