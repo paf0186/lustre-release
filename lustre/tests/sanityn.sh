@@ -6641,6 +6641,84 @@ test_81k() {
 }
 run_test 81k "rename checks ancestry before locking the target directory"
 
+cleanup_81l() {
+	local wedged=$1
+	local mdts=$(mdts_nodes)
+
+	do_nodes $mdts "$LCTL set_param fail_loc=0" > /dev/null 2>&1
+	[[ -e $wedged ]] || return 0
+
+	rm -f $wedged
+	stop mds1 -f
+	start mds1 $(mdsdevname 1) $MDS_MOUNT_OPTS
+	wait_recovery_complete mds1
+}
+
+test_81l() {
+	(( MDS1_VERSION >= $(version_code 2.16.0) )) ||
+		skip "Need MDS version at least 2.16.0"
+
+	local wedged=$TMP/rename_stale_deadlock.$$
+	local mdts=$(mdts_nodes)
+	local waited
+	local pid1
+	local pid2
+	local fa
+	local fb
+
+	stack_trap "cleanup_81l $wedged"
+
+	# A before B, so fid(A) < fid(B) and the two renames below disagree:
+	# while they are unrelated the order comes from the FIDs, and once B is
+	# A's ancestor it comes from the ancestry test instead
+	test_mkdir $DIR1/$tdir || error "(0) mkdir failed"
+	$LFS mkdir -i 0 $DIR1/$tdir/P || error "(1) mkdir P failed"
+	$LFS mkdir -i 0 $DIR1/$tdir/P/A || error "(2) mkdir A failed"
+	$LFS mkdir -i 0 $DIR1/$tdir/B || error "(3) mkdir B failed"
+	touch $DIR1/$tdir/P/A/$tfile || error "(4) touch failed"
+
+	fa=$($LFS path2fid $DIR1/$tdir/P/A | tr -d '[]' | cut -d: -f2)
+	fb=$($LFS path2fid $DIR1/$tdir/B | tr -d '[]' | cut -d: -f2)
+	(( fa < fb )) || error "(5) fid(A) $fa >= fid(B) $fb"
+
+	touch $wedged
+	#define OBD_FAIL_MDS_RENAME4 0x156
+	# the first rename decides its lock order and then sleeps holding
+	# nothing, so the move below can change the tree under it
+	do_nodes $mdts "$LCTL set_param fail_loc=0x80000156" > /dev/null
+
+	mrename $DIR1/$tdir/P/A/$tfile $DIR1/$tdir/B/$tfile > /dev/null 2>&1 &
+	pid1=$!
+	sleep 1
+
+	mrename $DIR2/$tdir/P/A $DIR2/$tdir/B/A > /dev/null 2>&1 ||
+		error "(6) move failed, the race did not happen"
+
+	#define OBD_FAIL_MDS_RENAME 0x153
+	# the second rename decides from the new tree, takes its first parent
+	# and sleeps, so both are mid-acquisition with opposite orders
+	do_nodes $mdts "$LCTL set_param fail_loc=0x80000153" > /dev/null
+	sleep 1
+
+	mrename $DIR2/$tdir/B/A/$tfile $DIR2/$tdir/B/$tfile > /dev/null 2>&1 &
+	pid2=$!
+
+	waited=0
+	while (( waited < 60 )) && { kill -0 $pid1 2> /dev/null ||
+				     kill -0 $pid2 2> /dev/null; }; do
+		sleep 1
+		waited=$((waited + 1))
+	done
+	if kill -0 $pid1 2> /dev/null ||
+	   kill -0 $pid2 2> /dev/null; then
+		error "(7) renames deadlocked on a stale lock order"
+	fi
+
+	rm -f $wedged
+	do_nodes $mdts "$LCTL set_param fail_loc=0" > /dev/null
+}
+run_test 81l "rename lock order must not go stale before the locks are taken"
+
 test_82() {
 	[[ "$MDS1_VERSION" -gt $(version_code 2.6.91) ]] ||
 		skip "Need MDS version at least 2.6.92"
