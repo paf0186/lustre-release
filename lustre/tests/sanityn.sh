@@ -6559,6 +6559,88 @@ test_81j() {
 }
 run_test 81j "inverse renames must not deadlock on the parent locks"
 
+cleanup_81k() {
+	local wedged=$1
+	local mdts=$(mdts_nodes)
+
+	do_nodes $mdts "$LCTL set_param fail_loc=0" > /dev/null 2>&1
+	[[ -e $wedged ]] || return 0
+
+	rm -f $wedged
+	# the rename and the lookup hold each other's locks and nothing times
+	# them out, so the MDT has to be brought back
+	stop mds1 -f
+	start mds1 $(mdsdevname 1) $MDS_MOUNT_OPTS
+	wait_recovery_complete mds1
+}
+
+test_81k() {
+	(( MDS1_VERSION >= $(version_code 2.15.65) )) ||
+		skip "Need MDS version at least 2.15.65"
+
+	local wedged=$TMP/rename_anc_deadlock.$$
+	local mdts=$(mdts_nodes)
+	local waited
+	local rpid
+	local lpid
+
+	stack_trap "cleanup_81k $wedged"
+
+	# D first, so fid(D) < fid(C).  The target child is then locked before
+	# the check that the source parent is not beneath it.
+	test_mkdir $DIR1/$tdir || error "(0) mkdir failed"
+	$LFS mkdir -i 0 $DIR1/$tdir/D || error "(1) mkdir D failed"
+	$LFS mkdir -i 0 $DIR1/$tdir/P || error "(2) mkdir P failed"
+	$LFS mkdir -i 0 $DIR1/$tdir/P/A || error "(3) mkdir A failed"
+	$LFS mkdir -i 0 $DIR1/$tdir/P/A/C || error "(4) mkdir C failed"
+	stat $DIR2/$tdir/P/A > /dev/null || error "(5) stat A failed"
+
+	touch $wedged
+	#define OBD_FAIL_MDS_RENAME4 0x156
+	# fires at the first of its two sites: after the lock order is decided
+	# and before either parent is locked, so the move below runs freely
+	do_nodes $mdts "$LCTL set_param fail_loc=0x80000156" > /dev/null
+
+	mrename $DIR1/$tdir/P/A/C $DIR1/$tdir/D > /dev/null 2>&1 &
+	rpid=$!
+	sleep 1
+
+	# D becomes an ancestor of A, so the rename above is now invalid and
+	# the server must reject it -- after it has locked D
+	mrename $DIR2/$tdir/P/A $DIR2/$tdir/D/A > /dev/null 2>&1 ||
+		error "(6) move failed, the race did not happen"
+
+	# Walk THROUGH D to a name that does not exist.  That is IT_LOOKUP, so
+	# the lock left cached on D carries no UPDATE bit and survives both the
+	# move's own lock and the rename's lock on the parent's bucket.  A stat
+	# OF D would take UPDATE, be revoked, and then block.  The failure here
+	# is the point of the step; success means the setup did not hold.
+	stat $DIR2/$tdir/D/zzz > /dev/null 2>&1 &&
+		error "(7) D/zzz exists, cannot cache D as an intermediate"
+
+	#define OBD_FAIL_MDS_RENAME2 0x154
+	do_nodes $mdts "$LCTL set_param fail_loc=0x80000154" > /dev/null
+	sleep 4
+
+	stat $DIR2/$tdir/D/A > /dev/null 2>&1 &
+	lpid=$!
+
+	waited=0
+	while (( waited < 60 )) && { kill -0 $rpid 2> /dev/null ||
+				     kill -0 $lpid 2> /dev/null; }; do
+		sleep 1
+		waited=$((waited + 1))
+	done
+	if kill -0 $rpid 2> /dev/null ||
+	   kill -0 $lpid 2> /dev/null; then
+		error "(8) rename and lookup deadlocked on the target dir"
+	fi
+
+	rm -f $wedged
+	do_nodes $mdts "$LCTL set_param fail_loc=0" > /dev/null
+}
+run_test 81k "rename checks ancestry before locking the target directory"
+
 test_82() {
 	[[ "$MDS1_VERSION" -gt $(version_code 2.6.91) ]] ||
 		skip "Need MDS version at least 2.6.92"
