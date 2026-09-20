@@ -6470,6 +6470,95 @@ test_81i() {
 }
 run_test 81i "samedir rename of a remote directory stays parallel"
 
+cleanup_81j() {
+	local wedged=$1
+	local mdts=$(mdts_nodes)
+
+	do_nodes $mdts "$LCTL set_param fail_loc=0" > /dev/null 2>&1
+	[[ -e $wedged ]] || return 0
+
+	rm -f $wedged
+	# the two service threads hold each other's parent lock and nothing
+	# times them out, so the MDT has to be brought back before the rest
+	# of the suite can run
+	stop mds1 -f
+	start mds1 $(mdsdevname 1) $MDS_MOUNT_OPTS
+	wait_recovery_complete mds1
+}
+
+test_81j() {
+	(( MDS1_VERSION >= $(version_code 2.17.58) )) ||
+		skip "Need MDS version at least 2.17.58"
+
+	local wedged=$TMP/rename_deadlock.$$
+	local mdts=$(mdts_nodes)
+	local raced=false
+	local elapsed
+	local waited
+	local pid1
+	local pid2
+	local i
+
+	stack_trap "cleanup_81j $wedged"
+
+	for ((i = 0; i < 5; i++)); do
+		rm -rf $DIR1/$tdir
+		test_mkdir $DIR1/$tdir || error "(0) mkdir failed"
+		$LFS mkdir -i 0 $DIR1/$tdir/a || error "(1) mkdir a failed"
+		$LFS mkdir -i 0 $DIR1/$tdir/p || error "(2) mkdir p failed"
+		# a rename keeps the directory's FID, so moving the older 'a'
+		# under the newer 'p' leaves a descendant whose FID is below
+		# its ancestor's.  Ancestry and FID order then disagree, and
+		# the two renames below pick different first parents.
+		mv $DIR1/$tdir/a $DIR1/$tdir/p/a || error "(3) mv failed"
+		touch $DIR1/$tdir/p/a/$tfile $DIR1/$tdir/p/$tfile ||
+			error "(4) touch failed"
+
+		# both mounts have to hold the dentries already: a rename that
+		# looks its source up first blocks there on the other rename's
+		# parent lock, and the two never overlap
+		stat $DIR1/$tdir/p/a/$tfile $DIR1/$tdir/p/$tfile > /dev/null ||
+			error "(5) stat on $MOUNT failed"
+		stat $DIR2/$tdir/p/$tfile $DIR2/$tdir/p/a/$tfile > /dev/null ||
+			error "(6) stat on $MOUNT2 failed"
+
+		touch $wedged
+		#define OBD_FAIL_MDS_RENAME 0x153
+		do_nodes $mdts "$LCTL set_param fail_loc=0x153" > /dev/null
+
+		elapsed=$SECONDS
+		mrename $DIR1/$tdir/p/a/$tfile $DIR1/$tdir/p/$tfile \
+			> /dev/null 2>&1 &
+		pid1=$!
+		mrename $DIR2/$tdir/p/$tfile $DIR2/$tdir/p/a/$tfile \
+			> /dev/null 2>&1 &
+		pid2=$!
+
+		waited=0
+		while (( waited < 60 )) && { kill -0 $pid1 2> /dev/null ||
+					     kill -0 $pid2 2> /dev/null; }; do
+			sleep 1
+			waited=$((waited + 1))
+		done
+		if kill -0 $pid1 2> /dev/null ||
+		   kill -0 $pid2 2> /dev/null; then
+			error "(7) renames deadlocked on the parent locks"
+		fi
+		elapsed=$((SECONDS - elapsed))
+		rm -f $wedged
+		do_nodes $mdts "$LCTL set_param fail_loc=0" > /dev/null
+
+		# the fail point holds the first parent lock for 5s, so a pair
+		# that finishes inside one window really did overlap; two
+		# windows means they serialised and the race never happened
+		echo "round $i finished in ${elapsed}s"
+		(( elapsed < 8 )) && { raced=true; break; }
+	done
+
+	$raced || skip_env "the two renames would not overlap"
+}
+run_test 81j "inverse renames must not deadlock on the parent locks"
+
 test_82() {
 	[[ "$MDS1_VERSION" -gt $(version_code 2.6.91) ]] ||
 		skip "Need MDS version at least 2.6.92"
