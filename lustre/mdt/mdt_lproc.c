@@ -759,6 +759,7 @@ MDT_BOOL_RW_ATTR(enable_remote_rename);
 MDT_BOOL_RW_ATTR(enable_parallel_rename_dir);
 MDT_BOOL_RW_ATTR(enable_parallel_rename_file);
 MDT_BOOL_RW_ATTR(enable_parallel_rename_crossdir);
+MDT_BOOL_RW_ATTR(enable_parallel_rename_remote);
 MDT_BOOL_RW_ATTR(enable_striped_dir);
 MDT_BOOL_RW_ATTR(enable_dir_migration);
 MDT_BOOL_RW_ATTR(enable_dir_restripe);
@@ -1411,6 +1412,7 @@ static struct attribute *mdt_attrs[] = {
 	&lustre_attr_enable_parallel_rename_dir.attr,
 	&lustre_attr_enable_parallel_rename_file.attr,
 	&lustre_attr_enable_parallel_rename_crossdir.attr,
+	&lustre_attr_enable_parallel_rename_remote.attr,
 	&lustre_attr_enable_pin_gid.attr,
 	&lustre_attr_enable_remote_dir.attr,
 	&lustre_attr_enable_remote_dir_gid.attr,

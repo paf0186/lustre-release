@@ -2784,6 +2784,18 @@ static int mdt_lock_two_dirs(struct mdt_thread_info *info,
 	return rc;
 }
 
+static bool mdt_rename_need_bfl(struct mdt_device *mdt, bool isdir,
+				bool remote, bool samedir)
+{
+	if (isdir)
+		return remote || !samedir ||
+		       !mdt->mdt_enable_parallel_rename_dir;
+
+	return !mdt->mdt_enable_parallel_rename_file ||
+	       (!samedir && !mdt->mdt_enable_parallel_rename_crossdir) ||
+	       (remote && !mdt->mdt_enable_parallel_rename_remote);
+}
+
 /*
  * VBR: rename versions in reply: 0 - srcdir parent; 1 - tgtdir parent;
  * 2 - srcdir child; 3 - tgtdir child.
@@ -2813,6 +2825,7 @@ static int mdt_reint_rename(struct mdt_thread_info *info,
 	ktime_t kstart = ktime_get();
 	enum mdt_stat_idx msi = 0;
 	bool remote;
+	bool old_isdir;
 	bool need_bfl = false;
 	bool preempt_done = false;
 	bool got_bfl = false;
@@ -2829,6 +2842,9 @@ static int mdt_reint_rename(struct mdt_thread_info *info,
 	if (!fid_is_md_operative(rr->rr_fid1) ||
 	    !fid_is_md_operative(rr->rr_fid2))
 		RETURN(-EPERM);
+
+	/* only a hint: the client sends the target's mode when it exists */
+	old_isdir = S_ISDIR(ma->ma_attr.la_mode);
 
 lock_bfl:
 	msrcdir = mtgtdir = NULL;
@@ -2894,14 +2910,8 @@ lock_bfl:
 		if (!mdt->mdt_enable_remote_rename && remote)
 			GOTO(out_put_tgtdir, rc = -EXDEV);
 
-		need_bfl |= remote ||
-			    (S_ISDIR(ma->ma_attr.la_mode) &&
-			     (msrcdir != mtgtdir ||
-			      !mdt->mdt_enable_parallel_rename_dir)) ||
-			    (!S_ISDIR(ma->ma_attr.la_mode) &&
-			     (!mdt->mdt_enable_parallel_rename_file ||
-			      (msrcdir != mtgtdir &&
-			       !mdt->mdt_enable_parallel_rename_crossdir)));
+		need_bfl |= mdt_rename_need_bfl(mdt, old_isdir, remote,
+						msrcdir == mtgtdir);
 		if (need_bfl && preempt_done) {
 			rc = mdt_rename_lock(info, rename_lh, false);
 			if (rc != 0) {
@@ -2912,7 +2922,7 @@ lock_bfl:
 			got_bfl = true;
 			msi = 0;
 		} else {
-			if (S_ISDIR(ma->ma_attr.la_mode))
+			if (old_isdir)
 				msi = LPROC_MDT_RENAME_PAR_DIR;
 			else
 				msi = LPROC_MDT_RENAME_PAR_FILE;
@@ -2921,7 +2931,7 @@ lock_bfl:
 			       "%s: %s %s parallel rename "DFID"/"DNAME"\n",
 			       mdt_obd_name(mdt),
 			       msrcdir == mtgtdir ? "samedir" : "crossdir",
-			       S_ISDIR(ma->ma_attr.la_mode) ? "dir" : "file",
+			       old_isdir ? "dir" : "file",
 			       PFID(rr->rr_fid1),
 			       encode_fn_luname(&rr->rr_name));
 		}
@@ -2998,15 +3008,21 @@ lock_bfl:
 	if (mdt_object_remote(mold) && !mdt->mdt_enable_remote_rename)
 		GOTO(out_put_old, rc = -EXDEV);
 
-	/* we used msrcdir as a hint to take BFL, but it may be wrong */
+	/* msrcdir and the client's mode were only hints to take BFL.  Only a
+	 * non-directory widens remote here: a rename within a directory does
+	 * not change the hierarchy, so a remote directory can stay parallel.
+	 */
+	old_isdir = S_ISDIR(lu_object_attr(&mold->mot_obj));
 	need_bfl |= !req_is_replay(req) &&
-		    !S_ISDIR(ma->ma_attr.la_mode) &&
-		    mdt_object_remote(mold);
+		    mdt_rename_need_bfl(mdt, old_isdir,
+					remote || (!old_isdir &&
+						   mdt_object_remote(mold)),
+					msrcdir == mtgtdir);
 
 	/* Check if @mtgtdir is subdir of @mold, before locking child
 	 * to avoid reverse locking.
 	 */
-	if (mtgtdir != msrcdir) {
+	if (old_isdir && mtgtdir != msrcdir) {
 		rc = mdo_is_subdir(info->mti_env, mdt_object_child(mtgtdir),
 				   old_fid);
 		if (rc) {
@@ -3027,6 +3043,7 @@ lock_bfl:
 				      3);
 	if (rc == 0) {
 		bool child_reverse_lock = false;
+		bool new_isdir;
 
 		/* the new_fid should have been filled at this moment */
 		if (lu_fid_eq(old_fid, new_fid))
@@ -3066,8 +3083,8 @@ lock_bfl:
 		 * link op which tries to create a link in this dir
 		 * back to this non-dir.
 		 */
-		if (S_ISDIR(lu_object_attr(&mnew->mot_obj)) &&
-		    !S_ISDIR(lu_object_attr(&mold->mot_obj)))
+		new_isdir = S_ISDIR(lu_object_attr(&mnew->mot_obj));
+		if (new_isdir && !old_isdir)
 			GOTO(out_put_new, rc = -EISDIR);
 
 		lh_oldp = &info->mti_lh[MDT_LH_OLD];
@@ -3103,7 +3120,7 @@ lock_bfl:
 		/* Check if @msrcdir is subdir of @mnew, before locking child
 		 * to avoid reverse locking.
 		 */
-		if (mtgtdir != msrcdir) {
+		if (new_isdir && mtgtdir != msrcdir) {
 			rc = mdo_is_subdir(info->mti_env,
 					   mdt_object_child(msrcdir), new_fid);
 			if (rc) {
@@ -3164,7 +3181,7 @@ lock_bfl:
 			got_bfl = true;
 			msi = LPROC_MDT_RENAME_TRYLOCK;
 
-			if (mtgtdir != msrcdir) {
+			if (old_isdir && mtgtdir != msrcdir) {
 				/* Check if @mtgtdir is subdir of @mold */
 				rc = mdo_is_subdir(info->mti_env,
 						   mdt_object_child(mtgtdir),
