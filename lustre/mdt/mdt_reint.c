@@ -3090,6 +3090,19 @@ lock_bfl:
 		lh_oldp = &info->mti_lh[MDT_LH_OLD];
 		lh_newp = &info->mti_lh[MDT_LH_NEW];
 
+		/* Check if @msrcdir is subdir of @mnew, before locking child
+		 * to avoid reverse locking.
+		 */
+		if (new_isdir && mtgtdir != msrcdir) {
+			rc = mdo_is_subdir(info->mti_env,
+					   mdt_object_child(msrcdir), new_fid);
+			if (rc) {
+				if (rc == 1)
+					rc = -EINVAL;
+				GOTO(out_put_new, rc);
+			}
+		}
+
 		/* We will lock in child fid order here to avoid a
 		 * deadlock related to hardlinks thats only possible with
 		 * regular files. LU-15491
@@ -3116,19 +3129,6 @@ lock_bfl:
 
 		/* save version after locking */
 		mdt_version_get_save(info, mold, 2);
-
-		/* Check if @msrcdir is subdir of @mnew, before locking child
-		 * to avoid reverse locking.
-		 */
-		if (new_isdir && mtgtdir != msrcdir) {
-			rc = mdo_is_subdir(info->mti_env,
-					   mdt_object_child(msrcdir), new_fid);
-			if (rc) {
-				if (rc == 1)
-					rc = -EINVAL;
-				GOTO(out_unlock_new, rc);
-			}
-		}
 
 		/* We used to acquire MDS_INODELOCK_FULL here but we
 		 * can't do this now because a running HSM restore on
