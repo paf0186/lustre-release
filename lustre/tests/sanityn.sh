@@ -6470,7 +6470,7 @@ test_81i() {
 }
 run_test 81i "samedir rename of a remote directory stays parallel"
 
-cleanup_81j() {
+cleanup_rename_deadlock() {
 	local wedged=$1
 	local mdts=$(mdts_nodes)
 
@@ -6478,9 +6478,9 @@ cleanup_81j() {
 	[[ -e $wedged ]] || return 0
 
 	rm -f $wedged
-	# the two service threads hold each other's parent lock and nothing
-	# times them out, so the MDT has to be brought back before the rest
-	# of the suite can run
+	# the wedged service threads hold each other's locks and nothing times
+	# them out, so the MDT has to be brought back before the rest of the
+	# suite can run
 	stop mds1 -f
 	start mds1 $(mdsdevname 1) $MDS_MOUNT_OPTS
 	wait_recovery_complete mds1
@@ -6499,7 +6499,7 @@ test_81j() {
 	local pid2
 	local i
 
-	stack_trap "cleanup_81j $wedged"
+	stack_trap "cleanup_rename_deadlock $wedged"
 
 	for ((i = 0; i < 5; i++)); do
 		rm -rf $DIR1/$tdir
@@ -6559,21 +6559,6 @@ test_81j() {
 }
 run_test 81j "inverse renames must not deadlock on the parent locks"
 
-cleanup_81k() {
-	local wedged=$1
-	local mdts=$(mdts_nodes)
-
-	do_nodes $mdts "$LCTL set_param fail_loc=0" > /dev/null 2>&1
-	[[ -e $wedged ]] || return 0
-
-	rm -f $wedged
-	# the rename and the lookup hold each other's locks and nothing times
-	# them out, so the MDT has to be brought back
-	stop mds1 -f
-	start mds1 $(mdsdevname 1) $MDS_MOUNT_OPTS
-	wait_recovery_complete mds1
-}
-
 test_81k() {
 	(( MDS1_VERSION >= $(version_code 2.15.65) )) ||
 		skip "Need MDS version at least 2.15.65"
@@ -6584,7 +6569,7 @@ test_81k() {
 	local rpid
 	local lpid
 
-	stack_trap "cleanup_81k $wedged"
+	stack_trap "cleanup_rename_deadlock $wedged"
 
 	# D first, so fid(D) < fid(C).  The target child is then locked before
 	# the check that the source parent is not beneath it.
@@ -6641,19 +6626,6 @@ test_81k() {
 }
 run_test 81k "rename checks ancestry before locking the target directory"
 
-cleanup_81l() {
-	local wedged=$1
-	local mdts=$(mdts_nodes)
-
-	do_nodes $mdts "$LCTL set_param fail_loc=0" > /dev/null 2>&1
-	[[ -e $wedged ]] || return 0
-
-	rm -f $wedged
-	stop mds1 -f
-	start mds1 $(mdsdevname 1) $MDS_MOUNT_OPTS
-	wait_recovery_complete mds1
-}
-
 test_81l() {
 	(( MDS1_VERSION >= $(version_code 2.16.0) )) ||
 		skip "Need MDS version at least 2.16.0"
@@ -6666,7 +6638,7 @@ test_81l() {
 	local fa
 	local fb
 
-	stack_trap "cleanup_81l $wedged"
+	stack_trap "cleanup_rename_deadlock $wedged"
 
 	# A before B, so fid(A) < fid(B) and the two renames below disagree:
 	# while they are unrelated the order comes from the FIDs, and once B is
@@ -6718,6 +6690,93 @@ test_81l() {
 	do_nodes $mdts "$LCTL set_param fail_loc=0" > /dev/null
 }
 run_test 81l "rename lock order must not go stale before the locks are taken"
+
+test_81m() {
+	(( MDS1_VERSION >= $(version_code 2.17.58) )) ||
+		skip "Need MDS version at least 2.17.58"
+
+	local wedged=$TMP/rename_cycle_deadlock.$$
+	local mdts=$(mdts_nodes)
+	local live=false
+	local waited
+	local pids
+	local dir
+	local pid
+	local fa
+	local fc
+
+	mkdir -p $MOUNT3 && mount_client $MOUNT3 ||
+		skip_env "cannot mount a third client"
+	stack_trap "umount_client $MOUNT3"
+	stack_trap "cleanup_rename_deadlock $wedged"
+
+	# created oldest first and then nested the other way up, so A is C's
+	# ancestor while fid(A) is above fid(C)
+	test_mkdir $DIR1/$tdir || error "(0) mkdir failed"
+	$LFS mkdir -i 0 $DIR1/$tdir/C || error "(1) mkdir C failed"
+	$LFS mkdir -i 0 $DIR1/$tdir/B || error "(2) mkdir B failed"
+	$LFS mkdir -i 0 $DIR1/$tdir/A || error "(3) mkdir A failed"
+	mv $DIR1/$tdir/B $DIR1/$tdir/A/B || error "(4) mv B failed"
+	mv $DIR1/$tdir/C $DIR1/$tdir/A/B/C || error "(5) mv C failed"
+	touch $DIR1/$tdir/A/$tfile $DIR1/$tdir/A/B/$tfile \
+		$DIR1/$tdir/A/B/C/$tfile || error "(6) touch failed"
+
+	fa=$($LFS path2fid $DIR1/$tdir/A | tr -d '[]' | cut -d: -f2)
+	fc=$($LFS path2fid $DIR1/$tdir/A/B/C | tr -d '[]' | cut -d: -f2)
+	(( fa > fc )) || error "(7) fid(A) $fa <= fid(C) $fc"
+
+	# every mount has to hold the dentries already: a rename that looks
+	# its source up first blocks there on another rename's parent lock
+	for dir in $DIR1 $DIR2 $DIR3; do
+		stat $dir/$tdir/A/$tfile $dir/$tdir/A/B/$tfile \
+			$dir/$tdir/A/B/C/$tfile > /dev/null ||
+			error "(8) stat on $dir failed"
+	done
+
+	touch $wedged
+	#define OBD_FAIL_MDS_RENAME4 0x156
+	# sleep before either parent lock, so all three renames reach the
+	# server and resolve their names while no parent lock is held
+	do_nodes $mdts "$LCTL set_param fail_loc=0x156" > /dev/null
+
+	# A is B's ancestor and B is C's, so the first two renames lock the
+	# ancestor first.  The third has the ancestor as its source parent,
+	# which the ancestry test does not ask about, and falls back to FID
+	# order: A, B and C in a cycle that no two of them can form.
+	mrename $DIR1/$tdir/A/B/$tfile $DIR1/$tdir/A/$tfile > /dev/null 2>&1 &
+	pids=$!
+	mrename $DIR2/$tdir/A/B/C/$tfile $DIR2/$tdir/A/B/$tfile \
+		> /dev/null 2>&1 &
+	pids="$pids $!"
+	mrename $DIR3/$tdir/A/$tfile $DIR3/$tdir/A/B/C/$tfile \
+		> /dev/null 2>&1 &
+	pids="$pids $!"
+
+	sleep 2
+	#define OBD_FAIL_MDS_RENAME 0x153
+	# they wake into a sleep between the two parent locks, each holding
+	# the one the next is about to ask for
+	do_nodes $mdts "$LCTL set_param fail_loc=0x153" > /dev/null
+
+	waited=0
+	while (( waited < 90 )); do
+		live=false
+		for pid in $pids; do
+			kill -0 $pid 2> /dev/null && live=true
+		done
+		$live || break
+		sleep 1
+		waited=$((waited + 1))
+	done
+	for pid in $pids; do
+		kill -0 $pid 2> /dev/null &&
+			error "(9) three renames deadlocked in a cycle"
+	done
+
+	rm -f $wedged
+	do_nodes $mdts "$LCTL set_param fail_loc=0" > /dev/null
+}
+run_test 81m "a three-way rename cycle must not deadlock"
 
 test_82() {
 	[[ "$MDS1_VERSION" -gt $(version_code 2.6.91) ]] ||
