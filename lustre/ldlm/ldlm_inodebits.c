@@ -155,6 +155,20 @@ static inline bool ldlm_txn_same_server(const struct ldlm_lock *req,
  * skip an entire bunch when iterating the list in search for conflicting
  * locks if first lock of the bunch is not conflicting with us.
  */
+/*
+ * Is @lock held on behalf of a server thread rather than a client cache?
+ * A lock with no export is this MDT's own; one whose export is another MDT
+ * belongs to a peer's service thread.  Neither yields to a blocking AST the
+ * way a client's cached lock does.
+ */
+static bool ldlm_lock_is_server_held(const struct ldlm_lock *lock)
+{
+	if (lock->l_export == NULL)
+		return true;
+
+	return !!(exp_connect_flags(lock->l_export) & OBD_CONNECT_MDS_MDS);
+}
+
 static int
 ldlm_inodebits_compat_queue(struct list_head *queue, struct ldlm_lock *req,
 			    __u64 *ldlm_flags, struct list_head *work_list)
@@ -274,6 +288,17 @@ ldlm_inodebits_compat_queue(struct list_head *queue, struct ldlm_lock *req,
 			/* Locks with overlapping bits conflict. */
 			if (lock->l_policy_data.l_inodebits.bits & req_bits) {
 				compat = 0;
+
+				/* A caller that already holds locks and must
+				 * not wait for another service thread: give
+				 * way to a client, whose lock the blocking
+				 * AST revokes, but fail against a lock this
+				 * or a peer MDT holds, since neither side can
+				 * be made to yield.
+				 */
+				if ((*ldlm_flags & LDLM_FL_TRY_SRV_CONFLICT) &&
+				    ldlm_lock_is_server_held(lock))
+					RETURN(-EWOULDBLOCK);
 
 				if (unlikely(lock->l_req_mode == LCK_GROUP)) {
 					LASSERT(ldlm_has_dom(lock));
