@@ -1751,7 +1751,7 @@ static int mdt_rename_source_lock(struct mdt_thread_info *info,
 	if (unlikely(rc && !(ibits & MDS_INODELOCK_LOOKUP)))
 		mdt_object_unlock(info, NULL, lh_lookup, rc);
 
-	return 0;
+	return rc;
 }
 
 static void mdt_rename_source_unlock(struct mdt_thread_info *info,
