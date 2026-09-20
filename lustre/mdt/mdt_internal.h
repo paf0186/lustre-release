@@ -852,6 +852,9 @@ int mdt_check_resent_lock(struct mdt_thread_info *info, struct mdt_object *mo,
 int mdt_object_lock(struct mdt_thread_info *info, struct mdt_object *obj,
 		    struct mdt_lock_handle *lh, enum mds_ibits_locks ibits,
 		    enum ldlm_mode mode);
+int mdt_parent_lock_try(struct mdt_thread_info *info, struct mdt_object *o,
+			struct mdt_lock_handle *lh, const struct lu_name *lname,
+			enum ldlm_mode mode);
 int mdt_parent_lock(struct mdt_thread_info *info, struct mdt_object *o,
 		    struct mdt_lock_handle *lh, const struct lu_name *lname,
 		    enum ldlm_mode mode);
@@ -879,7 +882,7 @@ int mdt_object_lock_internal(struct mdt_thread_info *info,
 			     bool cache);
 int mdt_object_pdo_lock(struct mdt_thread_info *info, struct mdt_object *obj,
 			struct mdt_lock_handle *lh, const struct lu_name *name,
-			enum ldlm_mode mode, bool pdo_lock);
+			enum ldlm_mode mode, bool pdo_lock, bool trylock);
 int mdt_object_lookup_lock(struct mdt_thread_info *info,
 			   struct mdt_object *pobj, struct mdt_object *obj,
 			   struct mdt_lock_handle *lh, enum ldlm_mode mode);
@@ -1348,6 +1351,7 @@ enum mdt_stat_idx {
 	LPROC_MDT_RENAME_PAR_DIR,
 	LPROC_MDT_RENAME_CROSSDIR,
 	LPROC_MDT_RENAME_TRYLOCK,
+	LPROC_MDT_RENAME_PREEMPT,
 	LPROC_MDT_IO_READ,
 	LPROC_MDT_IO_WRITE,
 	LPROC_MDT_IO_READ_BYTES,

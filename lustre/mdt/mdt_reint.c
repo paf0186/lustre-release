@@ -2766,14 +2766,17 @@ static int mdt_lock_two_dirs(struct mdt_thread_info *info,
 	CFS_FAIL_TIMEOUT(OBD_FAIL_MDS_RENAME, 5);
 
 	if (mfirstdir != mseconddir) {
-		rc = mdt_parent_lock(info, mseconddir, lh_seconddirp,
-				     secondname, LCK_PW);
+		/* already holding the first parent: fail rather than wait
+		 * for another service thread
+		 */
+		rc = mdt_parent_lock_try(info, mseconddir, lh_seconddirp,
+					 secondname, LCK_PW);
 	} else if (!mdt_object_remote(mseconddir)) {
 		if (lh_firstdirp->mlh_pdo_hash !=
 		    lh_seconddirp->mlh_pdo_hash) {
 			rc = mdt_object_pdo_lock(info, mseconddir,
 						 lh_seconddirp, secondname,
-						 LCK_PW, false);
+						 LCK_PW, false, false);
 			CFS_FAIL_TIMEOUT(OBD_FAIL_MDS_PDO_LOCK2, 10);
 		}
 	}
@@ -2912,7 +2915,10 @@ lock_bfl:
 
 		need_bfl |= mdt_rename_need_bfl(mdt, old_isdir, remote,
 						msrcdir == mtgtdir);
-		if (need_bfl && preempt_done) {
+		/* a retry always takes the BFL: it is here because a lock was
+		 * contended, and without it this pass would race again
+		 */
+		if (preempt_done) {
 			rc = mdt_rename_lock(info, rename_lh, false);
 			if (rc != 0) {
 				CERROR("%s: cannot lock for rename: rc = %d\n",
@@ -2969,6 +2975,17 @@ lock_bfl:
 		rc = mdt_lock_two_dirs(info, msrcdir, lh_srcdirp, &rr->rr_name,
 				       mtgtdir, lh_tgtdirp, &rr->rr_tgt_name);
 
+	if (rc == -EWOULDBLOCK && !preempt_done) {
+		/* another service thread holds the second parent; retry under
+		 * the BFL rather than wait for it while holding the first
+		 */
+		mdt_object_put(info->mti_env, mtgtdir);
+		mdt_object_put(info->mti_env, msrcdir);
+		preempt_done = true;
+		mdt_counter_incr(req, LPROC_MDT_RENAME_PREEMPT,
+				 ktime_us_delta(ktime_get(), kstart));
+		goto lock_bfl;
+	}
 	if (rc != 0)
 		GOTO(out_unlock_rename, rc);
 

@@ -4102,7 +4102,7 @@ static int mdt_remote_object_lock_try(struct mdt_thread_info *mti,
  */
 int mdt_object_pdo_lock(struct mdt_thread_info *info, struct mdt_object *obj,
 			struct mdt_lock_handle *lh, const struct lu_name *name,
-			enum ldlm_mode mode, bool pdo_lock)
+			enum ldlm_mode mode, bool pdo_lock, bool trylock)
 {
 	struct ldlm_namespace *ns = info->mti_mdt->mdt_namespace;
 	union ldlm_policy_data *policy = &info->mti_policy;
@@ -4113,6 +4113,12 @@ int mdt_object_pdo_lock(struct mdt_thread_info *info, struct mdt_object *obj,
 	 * cancels.
 	 */
 	__u64 dlmflags = LDLM_FL_ATOMIC_CB;
+	/*
+	 * A caller that already holds locks asks not to wait behind another
+	 * service thread; a client's cached lock is still revoked normally.
+	 */
+	if (trylock)
+		dlmflags |= LDLM_FL_TRY_SRV_CONFLICT;
 	__u64 *cookie = NULL;
 	int rc;
 
@@ -4365,9 +4371,11 @@ int mdt_object_check_lock(struct mdt_thread_info *info,
  *
  * \retval	0 on success, -ev on error.
  */
-int mdt_parent_lock(struct mdt_thread_info *info, struct mdt_object *obj,
-		    struct mdt_lock_handle *lh, const struct lu_name *lname,
-		    enum ldlm_mode mode)
+static int mdt_parent_lock_mode(struct mdt_thread_info *info,
+				struct mdt_object *obj,
+				struct mdt_lock_handle *lh,
+				const struct lu_name *lname,
+				enum ldlm_mode mode, bool trylock)
 {
 	int rc;
 
@@ -4381,9 +4389,29 @@ int mdt_parent_lock(struct mdt_thread_info *info, struct mdt_object *obj,
 		rc = mdt_object_lock_internal(info, obj, mdt_object_fid(obj),
 					      lh, &ibits, 0, false);
 	} else {
-		rc = mdt_object_pdo_lock(info, obj, lh, lname, mode, true);
+		rc = mdt_object_pdo_lock(info, obj, lh, lname, mode, true,
+					 trylock);
 	}
 	RETURN(rc);
+}
+
+int mdt_parent_lock(struct mdt_thread_info *info, struct mdt_object *obj,
+		    struct mdt_lock_handle *lh, const struct lu_name *lname,
+		    enum ldlm_mode mode)
+{
+	return mdt_parent_lock_mode(info, obj, lh, lname, mode, false);
+}
+
+/*
+ * As mdt_parent_lock(), but fails with -EWOULDBLOCK rather than waiting for a
+ * lock another service thread holds.  For a caller that already holds a lock
+ * and so must not wait for a peer that cannot be made to yield.
+ */
+int mdt_parent_lock_try(struct mdt_thread_info *info, struct mdt_object *obj,
+			struct mdt_lock_handle *lh, const struct lu_name *lname,
+			enum ldlm_mode mode)
+{
+	return mdt_parent_lock_mode(info, obj, lh, lname, mode, true);
 }
 
 /**
