@@ -2306,7 +2306,20 @@ static int mdt_getattr_name_lock(struct mdt_thread_info *info,
 		/* step 1: lock parent only if parent is a directory */
 		if (S_ISDIR(lu_object_attr(&parent->mot_obj))) {
 			lhp = &info->mti_lh[MDT_LH_PARENT];
-			rc = mdt_parent_lock(info, parent, lhp, lname, LCK_PR);
+			/* the client keeps the locks of earlier sub-requests
+			 * until the batch replies, and a service thread may
+			 * wait for one of them while holding this parent
+			 */
+			if (info->mti_batch_env &&
+			    tgt_ses_info(info->mti_env)->tsi_batch_idx > 0) {
+				rc = mdt_parent_lock_nowait(info, parent, lhp,
+							    lname, LCK_PR);
+				if (rc == -EWOULDBLOCK)
+					rc = -EBUSY;
+			} else {
+				rc = mdt_parent_lock(info, parent, lhp, lname,
+						     LCK_PR);
+			}
 			if (unlikely(rc != 0))
 				RETURN(rc);
 		}
