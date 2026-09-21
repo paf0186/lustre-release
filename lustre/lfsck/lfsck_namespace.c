@@ -2985,6 +2985,13 @@ rebuild:
 
 			lfsck_linkea_del_buf(ldata, cname);
 			linkea_first_entry(ldata);
+
+			/* hold with the child locked and before any entry
+			 * under another parent is repaired
+			 */
+			CFS_FAIL_TIMEOUT(OBD_FAIL_LFSCK_REPAIR_DIRENT_DELAY,
+					 cfs_fail_val ? cfs_fail_val : 20);
+
 			/* There may be some invalid dangling name entries under
 			 * other parent directories, remove all of them.
 			 */
