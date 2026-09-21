@@ -7897,6 +7897,46 @@ test_81ac() {
 }
 run_test 81ac "a link must not stall behind a batched statahead"
 
+test_81ad() {
+	(( MDS1_VERSION >= $(version_code 2.17.58) )) ||
+		skip "Need MDS version at least 2.17.58"
+
+	# one PDO bucket, see 81z; the rename moves the first name out of the
+	# directory and the batch stats the second
+	local na=2vbcbaaa
+	local nb=7pbtbaaa
+	local mdts=$(mdts_nodes)
+	local batch=$(statahead_first_batch)
+	local fits=false
+	local p
+	local i
+	local j
+	local k
+
+	stack_trap "do_nodes $mdts \"$LCTL set_param fail_loc=0 fail_val=0\" \
+		> /dev/null"
+
+	mkdir_on_mdt0 $DIR1/$tdir || error "(0) mkdir failed"
+	mkdir_on_mdt0 $DIR1/${tdir}_tgt || error "(1) mkdir failed"
+	stack_trap "rm -rf $DIR1/${tdir}_tgt || true"
+
+	# the renamed name has to be pinned and its partner later in the
+	# same batch
+	for p in a b c d e f g h k m n p q r s t u v w x y z; do
+		statahead_order_fill $p $na $nb
+		i=$(statahead_order_index $na)
+		j=$(statahead_order_index $nb)
+		(( i < j )) || { k=$i; i=$j; j=$k; }
+		(( i >= 1 && j <= batch )) && fits=true && break
+	done
+	$fits || skip_env "no filler suffix put the pair in the first batch"
+	echo "order: ${SA_ORDER[*]}, rename ${SA_ORDER[i]}, partner at $j"
+
+	statahead_pin_writer $((j - 1)) \
+		mrename $DIR2/$tdir/${SA_ORDER[i]} $DIR2/${tdir}_tgt/$tfile
+}
+run_test 81ad "a cross-dir rename must not stall behind a batched statahead"
+
 test_81af() {
 	(( MDS1_VERSION >= $(version_code 2.17.58) )) ||
 		skip "Need MDS version at least 2.17.58"
