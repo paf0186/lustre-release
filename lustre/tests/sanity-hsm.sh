@@ -6513,6 +6513,102 @@ test_607e()
 }
 run_test 607e "release file migrated after archive (blocking migrate)"
 
+cleanup_hsm_split_lock() {
+	local wedged=$1
+	local mdts=$(mdts_nodes)
+
+	do_nodes $mdts "$LCTL set_param fail_loc=0 fail_val=0" > /dev/null 2>&1
+	[[ -e $wedged ]] || return 0
+
+	rm -f $wedged
+	# the restore completion and the bridging operation hold each other's
+	# split XATTR/UPDATE (or LAYOUT/XATTR) locks and nothing times them
+	# out, so MDT0 has to be brought back before the rest of the suite runs
+	stop mds1 -f
+	start mds1 $(mdsdevname 1) $MDS_MOUNT_OPTS
+	wait_recovery_complete mds1
+}
+
+test_608a() {
+	(( MDS1_VERSION >= $(version_code 2.17.58) )) ||
+		skip "Need MDS version at least 2.17.58"
+
+	local wedged=$TMP/hsm_split_lock.$$
+	local mdts=$(mdts_nodes)
+	# DIR2 is mounted nouser_xattr, so the bridging setxattr must go
+	# through DIR1
+	local f=$DIR/$tdir/$tfile
+	local fid
+	local setpid
+	local waited
+	local fl
+
+	copytool setup
+
+	mkdir_on_mdt0 $DIR/$tdir
+	fid=$(create_small_file $f)
+
+	$LFS hsm_archive $f || error "(1) archive failed"
+	wait_request_state $fid ARCHIVE SUCCEED
+	$LFS hsm_release $f || error "(2) release failed"
+	check_hsm_flags $f "0x0000000d"
+
+	# warm the setxattr's path so its own lookup does not queue on the
+	# parent bucket instead of the file's locks
+	stat $f > /dev/null 2>&1
+
+	stack_trap "cleanup_hsm_split_lock $wedged"
+
+	#define OBD_FAIL_MDS_HSM_COMPLETE_DELAY 0x240a
+	# the restore completion holds the file's XATTR lock here, before it
+	# reacquires the UPDATE lock at the end
+	do_nodes $mdts "$LCTL set_param fail_val=300 fail_loc=0x8000240a" \
+		> /dev/null
+
+	$LFS hsm_restore $f || error "(3) restore request failed"
+
+	# wait for the completion to park at the fail point holding XATTR;
+	# the CFS_FAILED bit (0x40000000) in fail_loc, printed in decimal,
+	# marks that a thread reached it
+	waited=0
+	while (( waited < 60 )); do
+		fl=$(do_facet mds1 "$LCTL get_param -n fail_loc")
+		(( fl & 0x40000000 )) && break
+		sleep 1
+		waited=$((waited + 1))
+	done
+	(( waited < 60 )) || error "(4) restore completion never parked"
+
+	# a plain setxattr bridges XATTR and UPDATE in one enqueue and wedges
+	# between the completion's two acquisitions
+	setfattr -n user.x -v y $f &
+	setpid=$!
+	sleep 2
+
+	touch $wedged
+	# release the parked completion; it now reacquires UPDATE behind the
+	# queued setxattr
+	do_nodes $mdts "$LCTL set_param fail_loc=0" > /dev/null
+
+	# neither the restore nor the setxattr can finish once the cycle forms
+	waited=0
+	while (( waited < 60 )) &&
+	      { kill -0 $setpid 2> /dev/null ||
+		[[ $(get_request_state $fid RESTORE) != SUCCEED ]]; }; do
+		sleep 1
+		waited=$((waited + 1))
+	done
+	if kill -0 $setpid 2> /dev/null ||
+	   [[ $(get_request_state $fid RESTORE) != SUCCEED ]]; then
+		error "(5) HSM restore completion deadlocked behind a setxattr"
+	fi
+
+	wait $setpid || error "(6) setxattr failed"
+	rm -f $wedged
+	do_nodes $mdts "$LCTL set_param fail_loc=0 fail_val=0" > /dev/null
+}
+run_test 608a "a setxattr must not wedge HSM restore completion (XATTR/UPDATE)"
+
 complete_test $SECONDS
 check_and_cleanup_lustre
 exit_status
