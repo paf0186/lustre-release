@@ -21,6 +21,10 @@ ALWAYS_EXCEPT="$SANITYN_EXCEPT "
 [[ $(uname -r) = *"debug" ]] &&
 	always_except LU-10870	40a
 
+# these wedge an MDT: the rename retry takes its locks blocking, so the
+# cycle re-forms against a counterparty that never takes the rename lock
+always_except LU-0000	81w 81x
+
 if [ $mds1_FSTYPE = "zfs" ]; then
 	# LU-2829 / LU-2887 - make allowances for ZFS slowness
 	TEST33_NFILES=${TEST33_NFILES:-1000}
@@ -7376,6 +7380,15 @@ test_81w() {
 	mkdir -p $MOUNT3 && mount_client $MOUNT3 ||
 		skip_env "cannot mount a third client"
 	stack_trap "umount_client $MOUNT3"
+	# a swap interrupted by the MDT restart below leaves a file that
+	# returns EIO, and such a file cannot be unlinked by name, nor can its
+	# FID be read back.  Whether the survivor is f or g depends on how far
+	# the rename got, so offer both.  Registered before the restart so
+	# that it runs after it.
+	stack_trap 'rm -rf $DIR1/$tdir > /dev/null 2>&1;
+		[[ -n "$T81W_FIDS" ]] &&
+			$LFS rmfid $MOUNT $T81W_FIDS > /dev/null 2>&1;
+		rm -rf $DIR1/$tdir > /dev/null 2>&1; :'
 	stack_trap "cleanup_rename_deadlock $wedged"
 
 	mkdir_on_mdt0 $DIR1/$tdir || error "(0) mkdir failed"
@@ -7392,6 +7405,7 @@ test_81w() {
 	fg=$($LFS path2fid $DIR1/$tdir/Q/g | tr -d '[]' | cut -d: -f2)
 	(( ff < fg )) || error "(5) fid(f) $ff >= fid(g) $fg"
 	fidg=$($LFS path2fid $DIR1/$tdir/Q/g)
+	T81W_FIDS="$($LFS path2fid $DIR1/$tdir/P/f) $fidg"
 
 	stat $DIR2/$tdir/P/f $DIR2/$tdir/Q/g > /dev/null 2>&1
 	stat $DIR3/$tdir/P/f $DIR3/$tdir/Q/g > /dev/null 2>&1
@@ -7505,6 +7519,92 @@ test_81x() {
 	do_nodes $mdts "$LCTL set_param fail_loc=0" > /dev/null
 }
 run_test 81x "a rename must not cross a directory layout shrink"
+
+test_81y() {
+	(( MDS1_VERSION >= $(version_code 2.17.58) )) ||
+		skip "Need MDS version at least 2.17.58"
+
+	local wedged=$TMP/rename_pinned_master.$$
+	local mdts=$(mdts_nodes)
+	local waited
+	local evb
+	local eva
+	local sord
+	local qord
+	local pord
+	local pide
+	local pidc
+	local pidr
+
+	mkdir -p $MOUNT3 && mount_client $MOUNT3 ||
+		skip_env "cannot mount a third client"
+	stack_trap "umount_client $MOUNT3"
+	stack_trap "cleanup_rename_deadlock $wedged"
+
+	mkdir_on_mdt0 $DIR1/$tdir || error "(0) mkdir failed"
+	$LFS mkdir -i 0 $DIR1/$tdir/P || error "(1) mkdir P failed"
+	# -c 1 gives a plain directory on this build, so the master and its
+	# local stripes have to be spelled out
+	$LFS setdirstripe -i 0,0 $DIR1/$tdir/P/M ||
+		error "(2) setdirstripe failed"
+	# Q after the stripes, so it sorts above them and both renames take
+	# their other parent first
+	$LFS mkdir -i 0 $DIR1/$tdir/Q || error "(3) mkdir Q failed"
+	touch $DIR1/$tdir/P/M/$tfile || error "(4) touch failed"
+
+	sord=$($LFS getdirstripe $DIR1/$tdir/P/M | awk '/0x/{print $2; exit}' |
+	       tr -d '[]' | cut -d: -f2)
+	[[ -n "$sord" ]] || error "(5) M is not striped"
+	qord=$($LFS path2fid $DIR1/$tdir/Q | tr -d '[]' | cut -d: -f2)
+	pord=$($LFS path2fid $DIR1/$tdir/P | tr -d '[]' | cut -d: -f2)
+	(( pord < qord )) || error "(6) fid(P) $pord >= fid(Q) $qord"
+
+	stat $DIR2/$tdir/P $DIR2/$tdir/Q $DIR2/$tdir/P/M > /dev/null 2>&1
+	# the third mount needs a cached, valid lock on M: the revalidate
+	# shortcut is what makes the stat below reach the stripes at all
+	stat $DIR3/$tdir/P/M > /dev/null 2>&1
+
+	evb=$(dmesg | grep -c "was evicted by")
+	touch $wedged
+	#define OBD_FAIL_MDS_RENAME_PARENT_DELAY 0x2409
+	do_nodes $mdts "$LCTL set_param fail_val=25 fail_loc=0x80002409" \
+		> /dev/null
+
+	# the file rename holds stripe 0 and wants Q's bucket
+	mrename $DIR1/$tdir/P/M/$tfile $DIR1/$tdir/Q/$tfile > /dev/null 2>&1 &
+	pide=$!
+	sleep 2
+
+	# the stat revalidates M's stripes and blocks on stripe 0, holding a
+	# reference on its own lock for M
+	stat $DIR3/$tdir/P/M > /dev/null 2>&1 &
+	pidc=$!
+	sleep 1
+
+	# the directory rename holds Q's bucket and wants M, which the stat
+	# above cannot give up
+	mrename $DIR2/$tdir/P/M $DIR2/$tdir/Q/$tfile > /dev/null 2>&1 &
+	pidr=$!
+
+	waited=0
+	while (( waited < 70 )) && { kill -0 $pide 2> /dev/null ||
+				     kill -0 $pidc 2> /dev/null ||
+				     kill -0 $pidr 2> /dev/null; }; do
+		sleep 1
+		waited=$((waited + 1))
+	done
+	if kill -0 $pide 2> /dev/null || kill -0 $pidc 2> /dev/null ||
+	   kill -0 $pidr 2> /dev/null; then
+		error "(7) two renames and a stat of a striped master wedged"
+	fi
+
+	eva=$(dmesg | grep -c "was evicted by")
+	(( eva == evb )) || error "(8) a client was evicted to break the cycle"
+
+	rm -f $wedged
+	do_nodes $mdts "$LCTL set_param fail_loc=0 fail_val=0" > /dev/null
+}
+run_test 81y "a rename must not cross a pinned striped master"
 
 test_82() {
 	[[ "$MDS1_VERSION" -gt $(version_code 2.6.91) ]] ||
