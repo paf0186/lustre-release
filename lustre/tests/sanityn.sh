@@ -23,7 +23,7 @@ ALWAYS_EXCEPT="$SANITYN_EXCEPT "
 
 # these wedge an MDT: the rename retry takes its locks blocking, so the
 # cycle re-forms against a counterparty that never takes the rename lock
-always_except LU-0000	81w 81x 81z
+always_except LU-0000	81w 81x 81z 81ag
 
 if [ $mds1_FSTYPE = "zfs" ]; then
 	# LU-2829 / LU-2887 - make allowances for ZFS slowness
@@ -7603,7 +7603,7 @@ test_81y() {
 	rm -f $wedged
 	do_nodes $mdts "$LCTL set_param fail_loc=0 fail_val=0" > /dev/null
 }
-run_test 81y "a rename must not cross a pinned striped master"
+run_test 81y "a stat queued before the refusal lets two renames pass"
 
 test_81z() {
 	(( MDS1_VERSION >= $(version_code 2.17.58) )) ||
@@ -7894,6 +7894,183 @@ test_81ac() {
 		ln $DIR2/$tdir/${SA_ORDER[i - 1]} $DIR2/$tdir/$na
 }
 run_test 81ac "a link must not stall behind a batched statahead"
+
+test_81af() {
+	(( MDS1_VERSION >= $(version_code 2.17.58) )) ||
+		skip "Need MDS version at least 2.17.58"
+
+	local wedged=$TMP/rename_pinned_master_retry.$$
+	local mdts=$(mdts_nodes)
+	local preempts=0
+	local waited
+	local evb
+	local eva
+	local sfid
+	local qfid
+	local pord
+	local qord
+	local pide
+	local pidc
+	local pidr
+	local i
+
+	mkdir -p $MOUNT3 && mount_client $MOUNT3 ||
+		skip_env "cannot mount a third client"
+	stack_trap "umount_client $MOUNT3"
+	stack_trap "cleanup_rename_deadlock $wedged"
+
+	mkdir_on_mdt0 $DIR1/$tdir || error "(0) mkdir failed"
+	$LFS mkdir -i 0 $DIR1/$tdir/P || error "(1) mkdir P failed"
+	$LFS setdirstripe -i 0,0 $DIR1/$tdir/P/M ||
+		error "(2) setdirstripe failed"
+	$LFS mkdir -i 0 $DIR1/$tdir/Q || error "(3) mkdir Q failed"
+	touch $DIR1/$tdir/P/M/$tfile || error "(4) touch failed"
+
+	# the rename out of the stripe must take the stripe before Q
+	sfid=$($LFS path2fid --parents $DIR1/$tdir/P/M/$tfile |
+	       cut -d/ -f1 | tr -d '[]')
+	qfid=$($LFS path2fid $DIR1/$tdir/Q | tr -d '[]')
+	(( ${sfid%%:*} < ${qfid%%:*} ||
+	   (${sfid%%:*} == ${qfid%%:*} &&
+	    $(echo $sfid | cut -d: -f2) < $(echo $qfid | cut -d: -f2)) )) ||
+		error "(5) the stripe of $tfile does not sort below Q"
+	pord=$($LFS path2fid $DIR1/$tdir/P | tr -d '[]' | cut -d: -f2)
+	qord=$(echo $qfid | cut -d: -f2)
+	(( pord < qord )) || error "(6) fid(P) $pord >= fid(Q) $qord"
+
+	stat $DIR1/$tdir/P/M/$tfile $DIR1/$tdir/Q > /dev/null 2>&1
+	stat $DIR2/$tdir/P $DIR2/$tdir/Q $DIR2/$tdir/P/M > /dev/null 2>&1
+	stat $DIR3/$tdir/P/M > /dev/null 2>&1
+
+	evb=$(dmesg | grep -c "was evicted by")
+	touch $wedged
+	do_nodes $mdts "$LCTL set_param mdt.*.md_stats=clear" > /dev/null
+	#define OBD_FAIL_MDS_RENAME_PARENT_DELAY 0x2409
+	do_nodes $mdts "$LCTL set_param fail_val=20 fail_loc=0x80002409" \
+		> /dev/null
+
+	# the file rename holds the stripe and waits before asking for Q
+	mrename $DIR1/$tdir/P/M/$tfile $DIR1/$tdir/Q/$tfile > /dev/null 2>&1 &
+	pide=$!
+	wait_update_facet mds1 "$LCTL get_param -n fail_loc" \
+		"$((0xc0002409))" 30 || error "(7) the file rename did not park"
+
+	# switch, never clear: a zero fail_loc releases the parked rename
+	#define OBD_FAIL_MDS_RENAME_PARENTS_DELAY 0x240c
+	do_nodes $mdts "$LCTL set_param fail_val=40 fail_loc=0x8000240c" \
+		> /dev/null
+	mrename $DIR2/$tdir/P/M $DIR2/$tdir/Q/$tfile > /dev/null 2>&1 &
+	pidr=$!
+	wait_update_facet mds1 "$LCTL get_param -n fail_loc" \
+		"$((0xc000240c))" 30 ||
+		error "(8) the directory rename did not park"
+
+	# the file rename is refused Q's bucket and retries, retaking the
+	# stripe while nothing waits on it; only then does the stat arrive
+	for ((i = 0; i < 60; i++)); do
+		preempts=$(rename_stat_sum rename_preempts)
+		(( preempts > 0 )) && break
+		sleep 1
+	done
+	(( preempts > 0 )) || error "(9) the file rename was never refused"
+	sleep 2
+	stat $DIR3/$tdir/P/M > /dev/null 2>&1 &
+	pidc=$!
+
+	waited=0
+	while (( waited < 200 )) && { kill -0 $pide 2> /dev/null ||
+				      kill -0 $pidc 2> /dev/null ||
+				      kill -0 $pidr 2> /dev/null; }; do
+		sleep 1
+		waited=$((waited + 1))
+	done
+	if kill -0 $pide 2> /dev/null || kill -0 $pidc 2> /dev/null ||
+	   kill -0 $pidr 2> /dev/null; then
+		error "(10) two renames and a stat of a striped master wedged"
+	fi
+
+	eva=$(dmesg | grep -c "was evicted by")
+	(( eva == evb )) ||
+		error "(11) a client was evicted to break the cycle"
+
+	rm -f $wedged
+	do_nodes $mdts "$LCTL set_param fail_loc=0 fail_val=0" > /dev/null
+}
+run_test 81af "a stat during a rename's retry must not pin it"
+
+test_81ag() {
+	(( MDS1_VERSION >= $(version_code 2.17.58) )) ||
+		skip "Need MDS version at least 2.17.58"
+
+	local wedged=$TMP/rename_stat_retry.$$
+	local mdts=$(mdts_nodes)
+	# a full_name_hash collision, as in 81z
+	local nd=2vbcbaaa
+	local nf=7pbtbaaa
+	local preempts=0
+	local waited
+	local fd
+	local fa
+	local pidr
+	local pids
+	local i
+
+	stack_trap "cleanup_rename_deadlock $wedged"
+
+	mkdir_on_mdt0 $DIR1/$tdir || error "(0) mkdir failed"
+	$LFS mkdir -i 0 $DIR1/$tdir/D0 || error "(1) mkdir D0 failed"
+	$LFS mkdir -i 0 $DIR1/$tdir/A || error "(2) mkdir A failed"
+	mv $DIR1/$tdir/D0 $DIR1/$tdir/A/$nd || error "(3) mv D failed"
+	touch $DIR1/$tdir/A/$nf || error "(4) touch failed"
+
+	fd=$($LFS path2fid $DIR1/$tdir/A/$nd | tr -d '[]' | cut -d: -f2)
+	fa=$($LFS path2fid $DIR1/$tdir/A | tr -d '[]' | cut -d: -f2)
+	(( fd < fa )) || error "(5) fid(D) $fd >= fid(A) $fa"
+
+	ls -d $DIR2/$tdir/A > /dev/null 2>&1
+	cancel_lru_locks mdc
+
+	touch $wedged
+	do_nodes $mdts "$LCTL set_param mdt.*.md_stats=clear" > /dev/null
+	# no ONCE bit, so the rename is held on its retry as well
+	#define OBD_FAIL_MDS_RENAME_PARENT_DELAY 0x2409
+	do_nodes $mdts "$LCTL set_param fail_val=25 fail_loc=0x2409" \
+		> /dev/null
+
+	mrename $DIR1/$tdir/A/$nf $DIR1/$tdir/A/$nd/new > /dev/null 2>&1 &
+	pidr=$!
+	wait_update_facet mds1 "$LCTL get_param -n fail_loc" \
+		"$((0x40002409))" 30 || error "(6) the rename did not park"
+
+	# a first stat holds the bucket when the first pass asks for it
+	stat $DIR2/$tdir/A/$nd > /dev/null 2>&1 &
+	for ((i = 0; i < 60; i++)); do
+		preempts=$(rename_stat_sum rename_preempts)
+		(( preempts > 0 )) && break
+		sleep 1
+	done
+	(( preempts > 0 )) || error "(7) the first pass was not refused"
+
+	# a second stat, cold again, arrives while the retry holds the child
+	cancel_lru_locks mdc
+	echo 2 > /proc/sys/vm/drop_caches
+	stat $DIR2/$tdir/A/$nd > /dev/null 2>&1 &
+	pids=$!
+
+	waited=0
+	while (( waited < 90 )) && { kill -0 $pidr 2> /dev/null ||
+				     kill -0 $pids 2> /dev/null; }; do
+		sleep 1
+		waited=$((waited + 1))
+	done
+	if kill -0 $pidr 2> /dev/null || kill -0 $pids 2> /dev/null; then
+		error "(8) a rename's retry and a stat deadlocked"
+	fi
+
+	rm -f $wedged
+	do_nodes $mdts "$LCTL set_param fail_loc=0 fail_val=0" > /dev/null
+}
+run_test 81ag "a stat during a rename's retry must not deadlock it"
 
 test_82() {
 	[[ "$MDS1_VERSION" -gt $(version_code 2.6.91) ]] ||
