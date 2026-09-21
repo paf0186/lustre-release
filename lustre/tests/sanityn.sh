@@ -7740,6 +7740,162 @@ test_81aa() {
 }
 run_test 81aa "a rename must not cross a lookup under one bucket"
 
+# refill $DIR1/$tdir with eight fillers named by prefix $1 plus the names
+# that follow, and leave its readdir order in SA_ORDER
+statahead_order_fill() {
+	local p=$1
+	local k
+
+	shift
+	rm -f $DIR1/$tdir/*
+	for ((k = 1; k <= 8; k++)); do
+		touch $DIR1/$tdir/$p$k || error "touch $p$k failed"
+	done
+	for k in "$@"; do
+		touch $DIR1/$tdir/$k || error "touch $k failed"
+	done
+	SA_ORDER=($(ls -U $DIR1/$tdir))
+}
+
+statahead_order_index() {
+	local k
+
+	for ((k = 0; k < ${#SA_ORDER[@]}; k++)); do
+		[[ ${SA_ORDER[k]} == $1 ]] && echo $k && return
+	done
+	echo -1
+}
+
+# ls stats the first entry itself and the first batch covers the next
+# statahead_min, so sub-request n is SA_ORDER[n + 1]
+statahead_first_batch() {
+	$LCTL get_param -n llite.*.statahead_min | head -n1
+}
+
+# hold a batched statahead of $DIR1/$tdir before sub-request $1, then run
+# the rest of the arguments as the writer
+statahead_pin_writer() {
+	local fv=$1
+	shift
+	local mdts=$(mdts_nodes)
+	local evictions
+	local waited
+	local start
+	local pidl
+	local pidw
+	local fl
+
+	cancel_lru_locks mdc
+	evictions=$(do_facet mds1 "dmesg | grep -c 'evicting client'")
+
+	#define OBD_FAIL_MDS_BATCH_DELAY 0x2405
+	do_nodes $mdts "$LCTL set_param fail_val=$fv fail_loc=0x80002405" \
+		> /dev/null
+
+	ls -l $DIR1/$tdir > /dev/null 2>&1 &
+	pidl=$!
+
+	waited=0
+	while (( waited < 40 )); do
+		fl=$(do_facet mds1 "$LCTL get_param -n fail_loc")
+		(( fl == 0xc0002405 )) && break
+		sleep 1
+		waited=$((waited + 1))
+	done
+	(( waited < 40 )) || skip_env "the batch did not reach the fail point"
+
+	start=$SECONDS
+	"$@" > /dev/null 2>&1 &
+	pidw=$!
+
+	waited=0
+	while (( waited < 200 )) && { kill -0 $pidl 2> /dev/null ||
+				      kill -0 $pidw 2> /dev/null; }; do
+		sleep 2
+		waited=$((waited + 2))
+	done
+	do_nodes $mdts "$LCTL set_param fail_loc=0 fail_val=0" > /dev/null
+
+	# the batch's next sub-request waits on the bucket the writer holds,
+	# and the writer on a lock the batch exported, which the client
+	# cannot drop until the batch replies
+	(( $(do_facet mds1 "dmesg | grep -c 'evicting client'") == \
+	   evictions )) ||
+		error "(10) the ls client was evicted to break $1"
+
+	(( SECONDS - start < 30 )) ||
+		error "(11) $1 stalled $((SECONDS - start))s on a batch"
+}
+
+test_81ab() {
+	(( MDS1_VERSION >= $(version_code 2.17.58) )) ||
+		skip "Need MDS version at least 2.17.58"
+
+	# one PDO bucket, see 81z
+	local na=2vbcbaaa
+	local nb=7pbtbaaa
+	local mdts=$(mdts_nodes)
+	local batch=$(statahead_first_batch)
+	local fits=false
+	local p
+	local i
+	local j
+	local k
+
+	stack_trap "do_nodes $mdts \"$LCTL set_param fail_loc=0 fail_val=0\" \
+		> /dev/null"
+
+	mkdir_on_mdt0 $DIR1/$tdir || error "(0) mkdir failed"
+
+	# the unlinked name has to be pinned and its partner later in the
+	# same batch
+	for p in a b c d e f g h k m n p q r s t u v w x y z; do
+		statahead_order_fill $p $na $nb
+		i=$(statahead_order_index $na)
+		j=$(statahead_order_index $nb)
+		(( i < j )) || { k=$i; i=$j; j=$k; }
+		(( i >= 1 && j <= batch )) && fits=true && break
+	done
+	$fits || skip_env "no filler prefix put the pair in the first batch"
+	echo "order: ${SA_ORDER[*]}, unlink ${SA_ORDER[i]}, partner at $j"
+
+	statahead_pin_writer $((j - 1)) unlink $DIR2/$tdir/${SA_ORDER[i]}
+}
+run_test 81ab "an unlink must not stall behind a batched statahead"
+
+test_81ac() {
+	(( MDS1_VERSION >= $(version_code 2.17.58) )) ||
+		skip "Need MDS version at least 2.17.58"
+
+	# one PDO bucket, see 81z; the link creates the first name and the
+	# batch stats the second
+	local na=2vbcbaaa
+	local nb=7pbtbaaa
+	local mdts=$(mdts_nodes)
+	local batch=$(statahead_first_batch)
+	local fits=false
+	local p
+	local i
+
+	stack_trap "do_nodes $mdts \"$LCTL set_param fail_loc=0 fail_val=0\" \
+		> /dev/null"
+
+	mkdir_on_mdt0 $DIR1/$tdir || error "(0) mkdir failed"
+
+	# the link source has to be pinned before $nb in the same batch
+	for p in a b c d e f g h k m n p q r s t u v w x y z; do
+		statahead_order_fill $p $nb
+		i=$(statahead_order_index $nb)
+		(( i >= 2 && i <= batch )) && fits=true && break
+	done
+	$fits || skip_env "no filler prefix put $nb in the first batch"
+	echo "order: ${SA_ORDER[*]}, link ${SA_ORDER[i - 1]}, $nb at $i"
+
+	statahead_pin_writer $((i - 1)) \
+		ln $DIR2/$tdir/${SA_ORDER[i - 1]} $DIR2/$tdir/$na
+}
+run_test 81ac "a link must not stall behind a batched statahead"
+
 test_82() {
 	[[ "$MDS1_VERSION" -gt $(version_code 2.6.91) ]] ||
 		skip "Need MDS version at least 2.6.92"
