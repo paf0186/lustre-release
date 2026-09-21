@@ -23,7 +23,7 @@ ALWAYS_EXCEPT="$SANITYN_EXCEPT "
 
 # these wedge an MDT: the rename retry takes its locks blocking, so the
 # cycle re-forms against a counterparty that never takes the rename lock
-always_except LU-0000	81w 81x
+always_except LU-0000	81w 81x 81z
 
 if [ $mds1_FSTYPE = "zfs" ]; then
 	# LU-2829 / LU-2887 - make allowances for ZFS slowness
@@ -7605,6 +7605,71 @@ test_81y() {
 	do_nodes $mdts "$LCTL set_param fail_loc=0 fail_val=0" > /dev/null
 }
 run_test 81y "a rename must not cross a pinned striped master"
+
+test_81z() {
+	(( MDS1_VERSION >= $(version_code 2.17.58) )) ||
+		skip "Need MDS version at least 2.17.58"
+
+	local wedged=$TMP/rename_rmdir_bucket.$$
+	local mdts=$(mdts_nodes)
+	# mlh_pdo_hash is full_name_hash() with a zero salt, so a colliding
+	# pair found once holds on every build.  If it ever stops colliding
+	# the rename below takes a different bucket and the test passes
+	# without exercising anything, which is visible because this test is
+	# expected to fail.
+	local nd=2vbcbaaa
+	local nf=7pbtbaaa
+	local waited
+	local fd
+	local fa
+	local pidr
+	local pidu
+
+	stack_trap "cleanup_rename_deadlock $wedged"
+
+	mkdir_on_mdt0 $DIR1/$tdir || error "(0) mkdir failed"
+	# D before A, then moved under it, so D sorts below its own parent
+	$LFS mkdir -i 0 $DIR1/$tdir/D0 || error "(1) mkdir D0 failed"
+	$LFS mkdir -i 0 $DIR1/$tdir/A || error "(2) mkdir A failed"
+	mv $DIR1/$tdir/D0 $DIR1/$tdir/A/$nd || error "(3) mv D failed"
+	touch $DIR1/$tdir/A/$nf || error "(4) touch failed"
+	# the rmdir must fail only after it has taken its locks
+	mkdir $DIR1/$tdir/A/$nd/keep || error "(5) mkdir keep failed"
+
+	fd=$($LFS path2fid $DIR1/$tdir/A/$nd | tr -d '[]' | cut -d: -f2)
+	fa=$($LFS path2fid $DIR1/$tdir/A | tr -d '[]' | cut -d: -f2)
+	(( fd < fa )) || error "(6) fid(D) $fd >= fid(A) $fa"
+
+	ls -d $DIR2/$tdir/A/$nd > /dev/null 2>&1
+
+	touch $wedged
+	#define OBD_FAIL_MDS_RENAME_PARENT_DELAY 0x2409
+	do_nodes $mdts "$LCTL set_param fail_val=25 fail_loc=0x80002409" \
+		> /dev/null
+
+	# the rename orders D before A, so it holds D and wants A's bucket
+	mrename $DIR1/$tdir/A/$nf $DIR1/$tdir/A/$nd/new > /dev/null 2>&1 &
+	pidr=$!
+	sleep 2
+
+	# the rmdir holds A's bucket for $nd, the same bucket, and wants D
+	rmdir $DIR2/$tdir/A/$nd > /dev/null 2>&1 &
+	pidu=$!
+
+	waited=0
+	while (( waited < 70 )) && { kill -0 $pidr 2> /dev/null ||
+				     kill -0 $pidu 2> /dev/null; }; do
+		sleep 1
+		waited=$((waited + 1))
+	done
+	if kill -0 $pidr 2> /dev/null || kill -0 $pidu 2> /dev/null; then
+		error "(7) a rename and an rmdir deadlocked under one bucket"
+	fi
+
+	rm -f $wedged
+	do_nodes $mdts "$LCTL set_param fail_loc=0 fail_val=0" > /dev/null
+}
+run_test 81z "a rename and an rmdir must not cross under one bucket"
 
 test_82() {
 	[[ "$MDS1_VERSION" -gt $(version_code 2.6.91) ]] ||
