@@ -1374,7 +1374,7 @@ static int mdt_lock_root_xattr(struct mdt_thread_info *info,
 
 	mdt_lock_reg_init(lh, LCK_PR);
 	rc = mdt_object_lock_internal(info, md_root, mdt_object_fid(md_root),
-				      lh, &ibits, 0, true);
+				      lh, &ibits, 0, true, false);
 	if (rc < 0)
 		return rc;
 

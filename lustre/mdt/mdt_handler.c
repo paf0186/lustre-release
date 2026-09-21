@@ -4057,6 +4057,8 @@ static int mdt_remote_object_lock_try(struct mdt_thread_info *mti,
 				      bool cache)
 {
 	struct ldlm_enqueue_info *einfo = &mti->mti_remote_einfo;
+	enum mds_ibits_locks granted = MDS_INODELOCK_NONE;
+	struct ldlm_lock *lock;
 	int rc;
 
 	LASSERT(mdt_object_remote(obj));
@@ -4088,8 +4090,12 @@ static int mdt_remote_object_lock_try(struct mdt_thread_info *mti,
 	/* other components like LFSCK can use lockless access
 	 * and populate cache, so we better invalidate it
 	 */
-	if (policy->l_inodebits.bits &
-	    (MDS_INODELOCK_UPDATE | MDS_INODELOCK_XATTR))
+	lock = ldlm_handle2lock(lh);
+	if (lock) {
+		granted = lock->l_policy_data.l_inodebits.bits;
+		ldlm_lock_put(lock);
+	}
+	if (granted & (MDS_INODELOCK_UPDATE | MDS_INODELOCK_XATTR))
 		mo_invalidate(mti->mti_env, mdt_object_child(obj));
 
 	return 0;
@@ -4102,7 +4108,7 @@ static int mdt_remote_object_lock_try(struct mdt_thread_info *mti,
  */
 int mdt_object_pdo_lock(struct mdt_thread_info *info, struct mdt_object *obj,
 			struct mdt_lock_handle *lh, const struct lu_name *name,
-			enum ldlm_mode mode, bool pdo_lock, bool trylock)
+			enum ldlm_mode mode, bool pdo_lock, bool nowait)
 {
 	struct ldlm_namespace *ns = info->mti_mdt->mdt_namespace;
 	union ldlm_policy_data *policy = &info->mti_policy;
@@ -4113,14 +4119,15 @@ int mdt_object_pdo_lock(struct mdt_thread_info *info, struct mdt_object *obj,
 	 * cancels.
 	 */
 	__u64 dlmflags = LDLM_FL_ATOMIC_CB;
+	__u64 *cookie = NULL;
+	int rc;
+
 	/*
 	 * A caller that already holds locks asks not to wait behind another
 	 * service thread; a client's cached lock is still revoked normally.
 	 */
-	if (trylock)
+	if (nowait)
 		dlmflags |= LDLM_FL_TRY_SRV_CONFLICT;
-	__u64 *cookie = NULL;
-	int rc;
 
 	LASSERT(obj);
 
@@ -4184,10 +4191,11 @@ int mdt_object_lock_internal(struct mdt_thread_info *info,
 			     struct mdt_lock_handle *lh,
 			     enum mds_ibits_locks *ibits,
 			     enum mds_ibits_locks trybits,
-			     bool cache)
+			     bool cache, bool nowait)
 {
 	union ldlm_policy_data *policy = &info->mti_policy;
 	struct ldlm_res_id *res_id = &info->mti_res_id;
+	enum mds_ibits_locks want = *ibits;
 	struct lustre_handle *handle;
 	int rc;
 
@@ -4222,6 +4230,9 @@ int mdt_object_lock_internal(struct mdt_thread_info *info,
 		__u64 dlmflags = LDLM_FL_ATOMIC_CB | LDLM_FL_LOCAL_ONLY;
 		__u64 *cookie = NULL;
 
+		if (nowait)
+			dlmflags |= LDLM_FL_TRY_SRV_CONFLICT;
+
 		handle = &lh->mlh_reg_lh;
 		LASSERT(!lustre_handle_is_used(handle));
 		LASSERT(lh->mlh_reg_mode != LCK_MODE_MIN);
@@ -4250,6 +4261,12 @@ int mdt_object_lock_internal(struct mdt_thread_info *info,
 		LASSERT(lock);
 		*ibits = lock->l_policy_data.l_inodebits.bits;
 		ldlm_lock_put(lock);
+
+		if (nowait && !(obj && mdt_object_remote(obj)) &&
+		    (*ibits & want) != want) {
+			mdt_object_unlock(info, obj, lh, 1);
+			rc = -EWOULDBLOCK;
+		}
 	}
 
 	return rc;
@@ -4289,17 +4306,37 @@ int mdt_object_lock_internal(struct mdt_thread_info *info,
  *
  * \retval		0 on success, -ev on error.
  */
-int mdt_object_lock(struct mdt_thread_info *info, struct mdt_object *obj,
-		    struct mdt_lock_handle *lh,  enum mds_ibits_locks ibits,
-		    enum ldlm_mode mode)
+static int mdt_object_lock_mode(struct mdt_thread_info *info,
+				struct mdt_object *obj,
+				struct mdt_lock_handle *lh,
+				enum mds_ibits_locks ibits,
+				enum ldlm_mode mode, bool nowait)
 {
 	int rc;
 
 	ENTRY;
 	mdt_lock_reg_init(lh, mode);
 	rc = mdt_object_lock_internal(info, obj, mdt_object_fid(obj), lh,
-				      &ibits, 0, false);
+				      &ibits, 0, false, nowait);
 	RETURN(rc);
+}
+
+int mdt_object_lock(struct mdt_thread_info *info, struct mdt_object *obj,
+		    struct mdt_lock_handle *lh,  enum mds_ibits_locks ibits,
+		    enum ldlm_mode mode)
+{
+	return mdt_object_lock_mode(info, obj, lh, ibits, mode, false);
+}
+
+/*
+ * As mdt_object_lock(), but fails with -EWOULDBLOCK rather than waiting for a
+ * conflicting lock another service thread holds.
+ */
+int mdt_object_lock_nowait(struct mdt_thread_info *info, struct mdt_object *obj,
+			   struct mdt_lock_handle *lh,
+			   enum mds_ibits_locks ibits, enum ldlm_mode mode)
+{
+	return mdt_object_lock_mode(info, obj, lh, ibits, mode, true);
 }
 
 /**
@@ -4320,10 +4357,12 @@ int mdt_object_lock(struct mdt_thread_info *info, struct mdt_object *obj,
  *
  * \retval		0 on success, -ev on error.
  */
-int mdt_object_check_lock(struct mdt_thread_info *info,
-			  struct mdt_object *parent, struct mdt_object *child,
-			  struct mdt_lock_handle *lh,
-			  enum mds_ibits_locks ibits, enum ldlm_mode mode)
+static int mdt_object_check_lock_mode(struct mdt_thread_info *info,
+				      struct mdt_object *parent,
+				      struct mdt_object *child,
+				      struct mdt_lock_handle *lh,
+				      enum mds_ibits_locks ibits,
+				      enum ldlm_mode mode, bool nowait)
 {
 	int rc;
 
@@ -4342,7 +4381,7 @@ int mdt_object_check_lock(struct mdt_thread_info *info,
 
 		rc = mdt_object_lock_internal(info, parent,
 					      mdt_object_fid(child), lh,
-					      &lookup_ibits, 0, false);
+					      &lookup_ibits, 0, false, nowait);
 		if (rc)
 			RETURN(rc);
 
@@ -4350,11 +4389,35 @@ int mdt_object_check_lock(struct mdt_thread_info *info,
 	}
 
 	rc = mdt_object_lock_internal(info, child, mdt_object_fid(child), lh,
-				      &ibits, 0, false);
+				      &ibits, 0, false, nowait);
 	if (rc && !(ibits & MDS_INODELOCK_LOOKUP))
 		mdt_object_unlock(info, NULL, lh, 1);
 
 	RETURN(rc);
+}
+
+int mdt_object_check_lock(struct mdt_thread_info *info,
+			  struct mdt_object *parent, struct mdt_object *child,
+			  struct mdt_lock_handle *lh,
+			  enum mds_ibits_locks ibits, enum ldlm_mode mode)
+{
+	return mdt_object_check_lock_mode(info, parent, child, lh, ibits, mode,
+					  false);
+}
+
+/*
+ * As mdt_object_check_lock(), but fails with -EWOULDBLOCK rather than waiting
+ * for a conflicting lock another service thread holds.
+ */
+int mdt_object_check_lock_nowait(struct mdt_thread_info *info,
+				 struct mdt_object *parent,
+				 struct mdt_object *child,
+				 struct mdt_lock_handle *lh,
+				 enum mds_ibits_locks ibits,
+				 enum ldlm_mode mode)
+{
+	return mdt_object_check_lock_mode(info, parent, child, lh, ibits, mode,
+					  true);
 }
 
 /**
@@ -4375,7 +4438,7 @@ static int mdt_parent_lock_mode(struct mdt_thread_info *info,
 				struct mdt_object *obj,
 				struct mdt_lock_handle *lh,
 				const struct lu_name *lname,
-				enum ldlm_mode mode, bool trylock)
+				enum ldlm_mode mode, bool nowait)
 {
 	int rc;
 
@@ -4387,10 +4450,10 @@ static int mdt_parent_lock_mode(struct mdt_thread_info *info,
 
 		mdt_lock_reg_init(lh, mode);
 		rc = mdt_object_lock_internal(info, obj, mdt_object_fid(obj),
-					      lh, &ibits, 0, false);
+					      lh, &ibits, 0, false, false);
 	} else {
 		rc = mdt_object_pdo_lock(info, obj, lh, lname, mode, true,
-					 trylock);
+					 nowait);
 	}
 	RETURN(rc);
 }
@@ -4407,7 +4470,7 @@ int mdt_parent_lock(struct mdt_thread_info *info, struct mdt_object *obj,
  * lock another service thread holds.  For a caller that already holds a lock
  * and so must not wait for a peer that cannot be made to yield.
  */
-int mdt_parent_lock_try(struct mdt_thread_info *info, struct mdt_object *obj,
+int mdt_parent_lock_nowait(struct mdt_thread_info *info, struct mdt_object *obj,
 			struct mdt_lock_handle *lh, const struct lu_name *lname,
 			enum ldlm_mode mode)
 {
@@ -4442,7 +4505,7 @@ int mdt_object_lock_try(struct mdt_thread_info *info, struct mdt_object *obj,
 	LASSERT(!(*ibits & trybits));
 	mdt_lock_reg_init(lh, mode);
 	rc = mdt_object_lock_internal(info, obj, mdt_object_fid(obj), lh, ibits,
-				      trybits, false);
+				      trybits, false, false);
 	if (rc && trylock_only) { /* clear error for try ibits lock only */
 		LASSERT(*ibits == 0);
 		rc = 0;
@@ -4455,9 +4518,11 @@ int mdt_object_lock_try(struct mdt_thread_info *info, struct mdt_object *obj,
  *
  * Both \a pobj and \a obj may be located on remote MDTs.
  */
-int mdt_object_lookup_lock(struct mdt_thread_info *info,
-			   struct mdt_object *pobj, struct mdt_object *obj,
-			   struct mdt_lock_handle *lh, enum ldlm_mode mode)
+static int mdt_object_lookup_lock_mode(struct mdt_thread_info *info,
+				       struct mdt_object *pobj,
+				       struct mdt_object *obj,
+				       struct mdt_lock_handle *lh,
+				       enum ldlm_mode mode, bool nowait)
 {
 	enum mds_ibits_locks ibits = MDS_INODELOCK_LOOKUP;
 	int rc;
@@ -4469,8 +4534,28 @@ int mdt_object_lookup_lock(struct mdt_thread_info *info,
 	LASSERT(ergo(!pobj, mdt_object_remote(obj)));
 	mdt_lock_reg_init(lh, mode);
 	rc = mdt_object_lock_internal(info, pobj, mdt_object_fid(obj), lh,
-				      &ibits, 0, false);
+				      &ibits, 0, false, nowait);
 	RETURN(rc);
+}
+
+int mdt_object_lookup_lock(struct mdt_thread_info *info,
+			   struct mdt_object *pobj, struct mdt_object *obj,
+			   struct mdt_lock_handle *lh, enum ldlm_mode mode)
+{
+	return mdt_object_lookup_lock_mode(info, pobj, obj, lh, mode, false);
+}
+
+/*
+ * As mdt_object_lookup_lock(), but fails with -EWOULDBLOCK rather than waiting
+ * for a conflicting lock another service thread holds.
+ */
+int mdt_object_lookup_lock_nowait(struct mdt_thread_info *info,
+				  struct mdt_object *pobj,
+				  struct mdt_object *obj,
+				  struct mdt_lock_handle *lh,
+				  enum ldlm_mode mode)
+{
+	return mdt_object_lookup_lock_mode(info, pobj, obj, lh, mode, true);
 }
 
 /**
@@ -6623,7 +6708,7 @@ static int mdt_init0(const struct lu_env *env, struct mdt_device *m,
 	m->mdt_enable_parallel_rename_dir = 1;
 	m->mdt_enable_parallel_rename_file = 1;
 	m->mdt_enable_parallel_rename_crossdir = 1;
-	m->mdt_enable_parallel_rename_remote = 1;
+	m->mdt_enable_parallel_rename_remote = 0;
 	m->mdt_enable_pin_gid = 0;
 	m->mdt_enable_remote_dir = 1;
 	m->mdt_enable_remote_dir_gid = 0;

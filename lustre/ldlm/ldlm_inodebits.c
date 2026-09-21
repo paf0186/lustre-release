@@ -140,21 +140,6 @@ static inline bool ldlm_txn_same_server(const struct ldlm_lock *req,
 			req->l_policy_data.l_inodebits.li_initiator_id;
 }
 
-/**
- * Determine if the lock is compatible with all locks on the queue.
- *
- * If \a work_list is provided, conflicting locks are linked there.
- * If \a work_list is not provided, we exit this function on first conflict.
- *
- * \retval 0 if there are conflicting locks in the \a queue
- * \retval 1 if the lock is compatible to all locks in \a queue
- *
- * IBITS locks in granted queue are organized in bunches of
- * same-mode/same-bits locks called "skip lists". The First lock in the
- * bunch contains a pointer to the end of the bunch.  This allows us to
- * skip an entire bunch when iterating the list in search for conflicting
- * locks if first lock of the bunch is not conflicting with us.
- */
 /*
  * Is @lock held on behalf of a server thread rather than a client cache?
  * A lock with no export is this MDT's own; one whose export is another MDT
@@ -163,12 +148,56 @@ static inline bool ldlm_txn_same_server(const struct ldlm_lock *req,
  */
 static bool ldlm_lock_is_server_held(const struct ldlm_lock *lock)
 {
+	/* a COS lock is held only until the transaction commits, which the
+	 * blocking AST kicks off; no thread has to finish first
+	 */
+	if (lock->l_req_mode == LCK_COS)
+		return false;
+
 	if (lock->l_export == NULL)
 		return true;
 
 	return !!(exp_connect_flags(lock->l_export) & OBD_CONNECT_MDS_MDS);
 }
 
+/*
+ * Is any lock in @lock's policy group held on behalf of a server thread?
+ * Granted locks with the same mode and bits share a policy group and the
+ * queue walk only visits its first member, but ownership is not uniform
+ * within a group: a client's cached lock and this or a peer MDT's lock
+ * can sit in the same one.
+ */
+static bool ldlm_inodebits_group_srv_held(struct ldlm_lock *lock)
+{
+	struct ldlm_lock *member;
+
+	if (ldlm_lock_is_server_held(lock))
+		return true;
+
+	list_for_each_entry(member, &lock->l_sl_policy, l_sl_policy)
+		if (ldlm_lock_is_server_held(member))
+			return true;
+
+	return false;
+}
+
+/**
+ * Determine if the lock is compatible with all locks on the queue.
+ *
+ * If \a work_list is provided, conflicting locks are linked there.
+ * If \a work_list is not provided, we exit this function on first conflict.
+ *
+ * \retval 0 if there are conflicting locks in the \a queue
+ * \retval 1 if the lock is compatible to all locks in \a queue
+ * \retval -EWOULDBLOCK if the caller asked not to wait and a conflicting
+ *	   lock is held by a thread that must run to completion
+ *
+ * IBITS locks in granted queue are organized in bunches of
+ * same-mode/same-bits locks called "skip lists". The First lock in the
+ * bunch contains a pointer to the end of the bunch.  This allows us to
+ * skip an entire bunch when iterating the list in search for conflicting
+ * locks if first lock of the bunch is not conflicting with us.
+ */
 static int
 ldlm_inodebits_compat_queue(struct list_head *queue, struct ldlm_lock *req,
 			    __u64 *ldlm_flags, struct list_head *work_list)
@@ -297,7 +326,7 @@ ldlm_inodebits_compat_queue(struct list_head *queue, struct ldlm_lock *req,
 				 * be made to yield.
 				 */
 				if ((*ldlm_flags & LDLM_FL_TRY_SRV_CONFLICT) &&
-				    ldlm_lock_is_server_held(lock))
+				    ldlm_inodebits_group_srv_held(lock))
 					RETURN(-EWOULDBLOCK);
 
 				if (unlikely(lock->l_req_mode == LCK_GROUP)) {

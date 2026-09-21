@@ -1661,7 +1661,7 @@ static int mdt_rename_lock(struct mdt_thread_info *info,
 	ibits = trylock ? MDS_INODELOCK_NONE : MDS_INODELOCK_UPDATE;
 	trybits = trylock ? MDS_INODELOCK_UPDATE : MDS_INODELOCK_NONE;
 	rc = mdt_object_lock_internal(info, obj, &LUSTRE_BFL_FID, lh,
-				      &ibits, trybits, false);
+				      &ibits, trybits, false, false);
 	mdt_object_put(info->mti_env, obj);
 	if (trylock && (ibits & MDS_INODELOCK_UPDATE))
 		RETURN(0);
@@ -1721,12 +1721,26 @@ out_put:
  * \retval	0 on success
  * \retval	-ev negative errno upon error
  */
+static int mdt_rename_child_lock(struct mdt_thread_info *info,
+				 struct mdt_object *parent,
+				 struct mdt_object *child,
+				 struct mdt_lock_handle *lh, bool nowait)
+{
+	enum mds_ibits_locks ibits = MDS_INODELOCK_LOOKUP |
+				     MDS_INODELOCK_UPDATE;
+
+	return nowait ?
+		mdt_object_check_lock_nowait(info, parent, child, lh, ibits,
+					     LCK_EX) :
+		mdt_object_check_lock(info, parent, child, lh, ibits, LCK_EX);
+}
+
 static int mdt_rename_source_lock(struct mdt_thread_info *info,
 				  struct mdt_object *parent,
 				  struct mdt_object *child,
 				  struct mdt_lock_handle *lh,
 				  struct mdt_lock_handle *lh_lookup,
-				  enum mds_ibits_locks ibits)
+				  enum mds_ibits_locks ibits, bool nowait)
 {
 	int rc;
 
@@ -1739,15 +1753,19 @@ static int mdt_rename_source_lock(struct mdt_thread_info *info,
 		return rc;
 
 	if (rc == 1) {
-		rc = mdt_object_lookup_lock(info, parent, child, lh_lookup,
-					    LCK_EX);
+		rc = nowait ?
+			mdt_object_lookup_lock_nowait(info, parent, child,
+						      lh_lookup, LCK_EX) :
+			mdt_object_lookup_lock(info, parent, child, lh_lookup,
+					       LCK_EX);
 		if (rc)
 			return rc;
 
 		ibits &= ~MDS_INODELOCK_LOOKUP;
 	}
 
-	rc = mdt_object_lock(info, child, lh, ibits, LCK_EX);
+	rc = nowait ? mdt_object_lock_nowait(info, child, lh, ibits, LCK_EX) :
+		      mdt_object_lock(info, child, lh, ibits, LCK_EX);
 	if (unlikely(rc && !(ibits & MDS_INODELOCK_LOOKUP)))
 		mdt_object_unlock(info, NULL, lh_lookup, rc);
 
@@ -2487,7 +2505,7 @@ lock_parent:
 	lhl = &info->mti_lh[MDT_LH_LOOKUP];
 	rc = mdt_rename_source_lock(info, spobj, sobj, lhs, lhl,
 				    MDS_INODELOCK_LOOKUP | MDS_INODELOCK_XATTR |
-				    MDS_INODELOCK_OPEN);
+				    MDS_INODELOCK_OPEN, false);
 	if (rc)
 		GOTO(unlock_links, rc);
 
@@ -2755,7 +2773,7 @@ static int mdt_lock_two_dirs(struct mdt_thread_info *info,
 			     const struct lu_name *firstname,
 			     struct mdt_object *mseconddir,
 			     struct mdt_lock_handle *lh_seconddirp,
-			     const struct lu_name *secondname)
+			     const struct lu_name *secondname, bool nowait)
 {
 	int rc;
 
@@ -2769,8 +2787,16 @@ static int mdt_lock_two_dirs(struct mdt_thread_info *info,
 		/* already holding the first parent: fail rather than wait
 		 * for another service thread
 		 */
-		rc = mdt_parent_lock_try(info, mseconddir, lh_seconddirp,
-					 secondname, LCK_PW);
+		if (nowait && CFS_FAIL_CHECK(OBD_FAIL_MDS_RENAME_NOWAIT))
+			rc = -EWOULDBLOCK;
+		else
+			rc = nowait ?
+				mdt_parent_lock_nowait(info, mseconddir,
+						       lh_seconddirp,
+						       secondname, LCK_PW) :
+				mdt_parent_lock(info, mseconddir,
+						lh_seconddirp, secondname,
+						LCK_PW);
 	} else if (!mdt_object_remote(mseconddir)) {
 		if (lh_firstdirp->mlh_pdo_hash !=
 		    lh_seconddirp->mlh_pdo_hash) {
@@ -2828,9 +2854,12 @@ static int mdt_reint_rename(struct mdt_thread_info *info,
 	ktime_t kstart = ktime_get();
 	enum mdt_stat_idx msi = 0;
 	bool remote;
+	bool remote_parent;
 	bool old_isdir;
 	bool need_bfl = false;
 	bool preempt_done = false;
+	bool preempt = false;
+	bool nowait;
 	bool got_bfl = false;
 	int rc;
 
@@ -2841,6 +2870,9 @@ static int mdt_reint_rename(struct mdt_thread_info *info,
 
 	if (info->mti_dlm_req)
 		ldlm_request_cancel(req, info->mti_dlm_req, 0, LATF_SKIP);
+
+	/* a replay takes every lock blocking, as it did when it first ran */
+	nowait = !req_is_replay(req);
 
 	if (!fid_is_md_operative(rr->rr_fid1) ||
 	    !fid_is_md_operative(rr->rr_fid2))
@@ -2895,6 +2927,9 @@ lock_bfl:
 	    mtgtdir->mot_obj.lo_header->loh_attr & LOHA_FSCRYPT_MD)
 		GOTO(out_put_tgtdir, rc = -EPERM);
 
+	/* a lock on either parent's MDT is taken blocking */
+	remote_parent = remote || mdt_object_remote(mtgtdir);
+
 	/*
 	 * Note: do not enqueue rename lock for replay request, because
 	 * if other MDT holds rename lock, but being blocked to wait for
@@ -2913,12 +2948,22 @@ lock_bfl:
 		if (!mdt->mdt_enable_remote_rename && remote)
 			GOTO(out_put_tgtdir, rc = -EXDEV);
 
-		need_bfl |= mdt_rename_need_bfl(mdt, old_isdir, remote,
+		need_bfl |= mdt_rename_need_bfl(mdt, old_isdir, remote_parent,
 						msrcdir == mtgtdir);
-		/* a retry always takes the BFL: it is here because a lock was
-		 * contended, and without it this pass would race again
+		/* A retry always takes the BFL: it is here because a lock was
+		 * contended, and without it this pass would race again.  A
+		 * rename that reaches another MDT takes it before the parents
+		 * rather than after the children, since a lock on a peer is
+		 * taken blocking and would otherwise be waited for while this
+		 * MDT's parent is held.
+		 *
+		 * The retry then takes its locks blocking, so it is ordered
+		 * only against what the BFL serialises -- other renames and
+		 * migrate.  A directory layout update, an rmdir sweeping a
+		 * striped directory, a setxattr or a lookup takes none of it,
+		 * and a cycle through one of those re-forms on the retry.
 		 */
-		if (preempt_done) {
+		if (preempt_done || (need_bfl && remote_parent)) {
 			rc = mdt_rename_lock(info, rename_lh, false);
 			if (rc != 0) {
 				CERROR("%s: cannot lock for rename: rc = %d\n",
@@ -2926,6 +2971,7 @@ lock_bfl:
 				GOTO(out_put_tgtdir, rc);
 			}
 			got_bfl = true;
+			nowait = false;
 			msi = 0;
 		} else {
 			if (old_isdir)
@@ -2970,10 +3016,11 @@ lock_bfl:
 	if (reverse)
 		rc = mdt_lock_two_dirs(info, mtgtdir, lh_tgtdirp,
 				       &rr->rr_tgt_name, msrcdir, lh_srcdirp,
-				       &rr->rr_name);
+				       &rr->rr_name, nowait);
 	else
 		rc = mdt_lock_two_dirs(info, msrcdir, lh_srcdirp, &rr->rr_name,
-				       mtgtdir, lh_tgtdirp, &rr->rr_tgt_name);
+				       mtgtdir, lh_tgtdirp, &rr->rr_tgt_name,
+				       nowait);
 
 	if (rc == -EWOULDBLOCK && !preempt_done) {
 		/* another service thread holds the second parent; retry under
@@ -2982,6 +3029,7 @@ lock_bfl:
 		mdt_object_put(info->mti_env, mtgtdir);
 		mdt_object_put(info->mti_env, msrcdir);
 		preempt_done = true;
+		nowait = false;
 		mdt_counter_incr(req, LPROC_MDT_RENAME_PREEMPT,
 				 ktime_us_delta(ktime_get(), kstart));
 		goto lock_bfl;
@@ -3106,6 +3154,7 @@ lock_bfl:
 
 		lh_oldp = &info->mti_lh[MDT_LH_OLD];
 		lh_newp = &info->mti_lh[MDT_LH_NEW];
+		lh_lookup = &info->mti_lh[MDT_LH_LOOKUP];
 
 		/* Check if @msrcdir is subdir of @mnew, before locking child
 		 * to avoid reverse locking.
@@ -3128,19 +3177,25 @@ lock_bfl:
 		 */
 		if (lu_fid_cmp(old_fid, new_fid) > 0) {
 			child_reverse_lock = true;
-			rc = mdt_object_check_lock(info, mtgtdir, mnew, lh_newp,
-						   MDS_INODELOCK_LOOKUP |
-						   MDS_INODELOCK_UPDATE,
-						   LCK_EX);
+			rc = mdt_rename_child_lock(info, mtgtdir, mnew, lh_newp,
+						   nowait);
+			if (rc == -EWOULDBLOCK) {
+				preempt = true;
+				GOTO(out_preempt, rc);
+			}
 			if (rc < 0)
 				GOTO(out_unlock_new, rc);
 		}
 
-		lh_lookup = &info->mti_lh[MDT_LH_LOOKUP];
 		rc = mdt_rename_source_lock(info, msrcdir, mold, lh_oldp,
 					    lh_lookup,
 					    MDS_INODELOCK_LOOKUP |
-					    MDS_INODELOCK_XATTR);
+					    MDS_INODELOCK_XATTR,
+					    nowait);
+		if (rc == -EWOULDBLOCK) {
+			preempt = true;
+			GOTO(out_preempt, rc);
+		}
 		if (rc < 0)
 			GOTO(out_unlock_new, rc);
 
@@ -3153,10 +3208,12 @@ lock_bfl:
 		 * lock. See LU-4002.
 		 */
 		if (!child_reverse_lock) {
-			rc = mdt_object_check_lock(info, mtgtdir, mnew, lh_newp,
-						   MDS_INODELOCK_LOOKUP |
-						   MDS_INODELOCK_UPDATE,
-						   LCK_EX);
+			rc = mdt_rename_child_lock(info, mtgtdir, mnew, lh_newp,
+						   nowait);
+			if (rc == -EWOULDBLOCK) {
+				preempt = true;
+				GOTO(out_preempt, rc);
+			}
 			if (rc != 0)
 				GOTO(out_unlock_new, rc);
 		}
@@ -3168,10 +3225,16 @@ lock_bfl:
 	} else {
 		lh_oldp = &info->mti_lh[MDT_LH_OLD];
 		lh_lookup = &info->mti_lh[MDT_LH_LOOKUP];
+
 		rc = mdt_rename_source_lock(info, msrcdir, mold, lh_oldp,
 					    lh_lookup,
 					    MDS_INODELOCK_LOOKUP |
-					    MDS_INODELOCK_XATTR);
+					    MDS_INODELOCK_XATTR,
+					    nowait);
+		if (rc == -EWOULDBLOCK) {
+			preempt = true;
+			GOTO(out_preempt, rc);
+		}
 		if (rc != 0)
 			GOTO(out_put_old, rc);
 
@@ -3218,7 +3281,8 @@ lock_bfl:
 			}
 		}
 	}
-	if (need_bfl && !got_bfl) {
+out_preempt:
+	if (preempt || (need_bfl && !got_bfl)) {
 		/* drop child locks if we didn't get BFL with trylock above */
 		if (mnew != NULL)
 			mdt_object_unlock(info, mnew, lh_newp, 1);
@@ -3235,7 +3299,11 @@ lock_bfl:
 		mdt_object_put(info->mti_env, mtgtdir);
 		mdt_object_put(info->mti_env, msrcdir);
 
+		preempt = false;
 		preempt_done = true;
+		nowait = false;
+		mdt_counter_incr(req, LPROC_MDT_RENAME_PREEMPT,
+				 ktime_us_delta(ktime_get(), kstart));
 		goto lock_bfl;
 	}
 

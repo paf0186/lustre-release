@@ -1756,7 +1756,7 @@ int mdt_brw_enqueue(struct mdt_thread_info *mti, struct ldlm_namespace *ns,
 		 * process.
 		 */
 		rc = mdt_object_lock_internal(mti, mo, mdt_object_fid(mo), lhc,
-					      &ibits, 0, false);
+					      &ibits, 0, false, false);
 		if (rc)
 			GOTO(out, rc);
 	}
