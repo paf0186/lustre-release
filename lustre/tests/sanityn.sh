@@ -7739,8 +7739,10 @@ test_81aa() {
 }
 run_test 81aa "a rename must not cross a lookup under one bucket"
 
-# refill $DIR1/$tdir with eight fillers named by prefix $1 plus the names
-# that follow, and leave its readdir order in SA_ORDER
+# refill $DIR1/$tdir with eight fillers named by suffix $1 plus the names
+# that follow, and leave its readdir order in SA_ORDER.  A filler name must
+# not end in a digit: that starts a name-pattern statahead, which keeps the
+# ls from starting its own for statahead_timeout seconds
 statahead_order_fill() {
 	local p=$1
 	local k
@@ -7748,7 +7750,7 @@ statahead_order_fill() {
 	shift
 	rm -f $DIR1/$tdir/*
 	for ((k = 1; k <= 8; k++)); do
-		touch $DIR1/$tdir/$p$k || error "touch $p$k failed"
+		touch $DIR1/$tdir/$k$p || error "touch $k$p failed"
 	done
 	for k in "$@"; do
 		touch $DIR1/$tdir/$k || error "touch $k failed"
@@ -7855,7 +7857,7 @@ test_81ab() {
 		(( i < j )) || { k=$i; i=$j; j=$k; }
 		(( i >= 1 && j <= batch )) && fits=true && break
 	done
-	$fits || skip_env "no filler prefix put the pair in the first batch"
+	$fits || skip_env "no filler suffix put the pair in the first batch"
 	echo "order: ${SA_ORDER[*]}, unlink ${SA_ORDER[i]}, partner at $j"
 
 	statahead_pin_writer $((j - 1)) unlink $DIR2/$tdir/${SA_ORDER[i]}
@@ -7887,7 +7889,7 @@ test_81ac() {
 		i=$(statahead_order_index $nb)
 		(( i >= 2 && i <= batch )) && fits=true && break
 	done
-	$fits || skip_env "no filler prefix put $nb in the first batch"
+	$fits || skip_env "no filler suffix put $nb in the first batch"
 	echo "order: ${SA_ORDER[*]}, link ${SA_ORDER[i - 1]}, $nb at $i"
 
 	statahead_pin_writer $((i - 1)) \
