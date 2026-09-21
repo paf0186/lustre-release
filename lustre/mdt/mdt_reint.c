@@ -2783,6 +2783,10 @@ static int mdt_lock_two_dirs(struct mdt_thread_info *info,
 
 	CFS_FAIL_TIMEOUT(OBD_FAIL_MDS_RENAME, 5);
 
+	/* hold between the two parents, with only the first one taken */
+	CFS_FAIL_TIMEOUT(OBD_FAIL_MDS_RENAME_PARENT_DELAY,
+			 cfs_fail_val ? cfs_fail_val : 20);
+
 	if (mfirstdir != mseconddir) {
 		/* already holding the first parent: fail rather than wait
 		 * for another service thread
