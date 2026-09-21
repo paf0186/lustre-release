@@ -3051,6 +3051,10 @@ lock_bfl:
 	CFS_FAIL_TIMEOUT(OBD_FAIL_MDS_RENAME4, 5);
 	CFS_FAIL_TIMEOUT(OBD_FAIL_MDS_RENAME2, 5);
 
+	/* hold with both parents locked and before either child is */
+	CFS_FAIL_TIMEOUT(OBD_FAIL_MDS_RENAME_PARENTS_DELAY,
+			 cfs_fail_val ? cfs_fail_val : 20);
+
 	/* find mold object. */
 	fid_zero(old_fid);
 	rc = mdt_lookup_version_check(info, msrcdir, &rr->rr_name, old_fid, 2);
