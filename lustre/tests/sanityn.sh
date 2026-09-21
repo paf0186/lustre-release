@@ -7773,6 +7773,27 @@ statahead_first_batch() {
 	$LCTL get_param -n llite.*.statahead_min | head -n1
 }
 
+# refill $DIR1/$tdir with fillers and one name of the pair that 81z shows
+# share a PDO bucket, such that the name is in the first batch with a filler
+# before it.  Either name will do, since only the hash matters: SA_NB is the
+# one in the directory at index SA_I, SA_NA the other
+statahead_pair_fill() {
+	local batch=$(statahead_first_batch)
+	local p
+
+	for p in a b c d e f g h k m n p q r s t u v w x y z; do
+		for SA_NB in 7pbtbaaa 2vbcbaaa; do
+			statahead_order_fill $p $SA_NB
+			SA_I=$(statahead_order_index $SA_NB)
+			(( SA_I >= 2 && SA_I <= batch )) || continue
+			[[ $SA_NB == 7pbtbaaa ]] && SA_NA=2vbcbaaa ||
+				SA_NA=7pbtbaaa
+			return 0
+		done
+	done
+	return 1
+}
+
 # hold a batched statahead of $DIR1/$tdir before sub-request $1, then run
 # the rest of the arguments as the writer
 statahead_pin_writer() {
@@ -7868,32 +7889,22 @@ test_81ac() {
 	(( MDS1_VERSION >= $(version_code 2.17.58) )) ||
 		skip "Need MDS version at least 2.17.58"
 
-	# one PDO bucket, see 81z; the link creates the first name and the
-	# batch stats the second
-	local na=2vbcbaaa
-	local nb=7pbtbaaa
 	local mdts=$(mdts_nodes)
-	local batch=$(statahead_first_batch)
-	local fits=false
-	local p
-	local i
 
 	stack_trap "do_nodes $mdts \"$LCTL set_param fail_loc=0 fail_val=0\" \
 		> /dev/null"
 
 	mkdir_on_mdt0 $DIR1/$tdir || error "(0) mkdir failed"
 
-	# the link source has to be pinned before $nb in the same batch
-	for p in a b c d e f g h k m n p q r s t u v w x y z; do
-		statahead_order_fill $p $nb
-		i=$(statahead_order_index $nb)
-		(( i >= 2 && i <= batch )) && fits=true && break
-	done
-	$fits || skip_env "no filler suffix put $nb in the first batch"
-	echo "order: ${SA_ORDER[*]}, link ${SA_ORDER[i - 1]}, $nb at $i"
+	# the link creates one name of the pair, and its source has to be
+	# pinned before the batch stats the other
+	statahead_pair_fill ||
+		skip_env "no filler suffix put the pair in the first batch"
+	echo "order: ${SA_ORDER[*]}, link ${SA_ORDER[SA_I - 1]}," \
+	     "$SA_NB at $SA_I"
 
-	statahead_pin_writer $((i - 1)) \
-		ln $DIR2/$tdir/${SA_ORDER[i - 1]} $DIR2/$tdir/$na
+	statahead_pin_writer $((SA_I - 1)) \
+		ln $DIR2/$tdir/${SA_ORDER[SA_I - 1]} $DIR2/$tdir/$SA_NA
 }
 run_test 81ac "a link must not stall behind a batched statahead"
 
@@ -8166,16 +8177,8 @@ test_81ah() {
 	(( MDS1_VERSION >= $(version_code 2.17.58) )) ||
 		skip "Need MDS version at least 2.17.58"
 
-	# one PDO bucket, see 81z; the link creates the first name and the
-	# batch stats the second
-	local na=2vbcbaaa
-	local nb=7pbtbaaa
 	local mdts=$(mdts_nodes)
-	local batch=$(statahead_first_batch)
-	local fits=false
 	local f
-	local p
-	local i
 
 	mkdir -p $MOUNT3 && mount_client $MOUNT3 ||
 		skip_env "cannot mount a third client"
@@ -8187,22 +8190,19 @@ test_81ah() {
 	mkdir_on_mdt0 $DIR1/${tdir}_swap || error "(1) mkdir failed"
 	stack_trap "rm -rf $DIR1/${tdir}_swap || true"
 
-	# the swapped file has to be pinned before $nb in the same batch
-	for p in a b c d e f g h k m n p q r s t u v w x y z; do
-		statahead_order_fill $p $nb
-		i=$(statahead_order_index $nb)
-		(( i >= 2 && i <= batch )) && fits=true && break
-	done
-	$fits || skip_env "no filler suffix put $nb in the first batch"
-	f=${SA_ORDER[i - 1]}
-	echo "order: ${SA_ORDER[*]}, swap $f, $nb at $i"
+	# the link creates one name of the pair, and the swapped file has to
+	# be pinned before the batch stats the other
+	statahead_pair_fill ||
+		skip_env "no filler suffix put the pair in the first batch"
+	f=${SA_ORDER[SA_I - 1]}
+	echo "order: ${SA_ORDER[*]}, swap $f, $SA_NB at $SA_I"
 
 	# newer than $f, so the swap locks it first
 	touch $DIR1/${tdir}_swap/$tfile || error "(2) touch failed"
 
-	statahead_pin_writer $((i - 1)) swap_then_link \
+	statahead_pin_writer $((SA_I - 1)) swap_then_link \
 		$DIR2/$tdir/$f $DIR2/${tdir}_swap/$tfile \
-		$DIR3/${tdir}_swap/$tfile $DIR3/$tdir/$na
+		$DIR3/${tdir}_swap/$tfile $DIR3/$tdir/$SA_NA
 }
 run_test 81ah "a layout swap and a link must not stall behind a statahead"
 
