@@ -8114,6 +8114,45 @@ test_81ag() {
 }
 run_test 81ag "a stat during a rename's retry must not deadlock it"
 
+# unlink $1, and once the unlink holds its directory, set an xattr on the
+# directory through descriptor 9
+unlink_then_setxattr() {
+	rm -f $1 &
+	sleep 2
+	setfattr -n user.t81ae -v 1 /proc/self/fd/9
+	wait
+}
+
+test_81ae() {
+	(( MDS1_VERSION >= $(version_code 2.17.58) )) ||
+		skip "Need MDS version at least 2.17.58"
+
+	local mdts=$(mdts_nodes)
+	local k
+
+	mkdir -p $MOUNT3 && mount_client $MOUNT3 ||
+		skip_env "cannot mount a third client"
+	stack_trap "umount_client $MOUNT3 || true"
+	stack_trap "do_nodes $mdts \"$LCTL set_param fail_loc=0 fail_val=0\" \
+		> /dev/null"
+
+	mkdir_on_mdt0 $DIR1/$tdir || error "(0) mkdir failed"
+	for ((k = 1; k <= 8; k++)); do
+		touch $DIR1/$tdir/${k}a || error "(1) touch ${k}a failed"
+	done
+	SA_ORDER=($(ls -U $DIR1/$tdir))
+	echo "order: ${SA_ORDER[*]}, unlink ${SA_ORDER[1]}"
+
+	# the setxattr must not look the directory up by name: that would
+	# queue on the directory behind the unlink instead of ahead of the
+	# batch
+	exec 9< $DIR3/$tdir || error "(2) open $DIR3/$tdir failed"
+	stack_trap "exec 9<&-"
+
+	statahead_pin_writer 1 unlink_then_setxattr $DIR2/$tdir/${SA_ORDER[1]}
+}
+run_test 81ae "an unlink and a setxattr must not stall behind a statahead"
+
 # swap the layouts of $1 and $2, and once the swap holds the higher FID and
 # waits for the other, link $3 to $4
 swap_then_link() {
