@@ -7380,15 +7380,14 @@ test_81w() {
 	mkdir -p $MOUNT3 && mount_client $MOUNT3 ||
 		skip_env "cannot mount a third client"
 	stack_trap "umount_client $MOUNT3"
-	# a swap interrupted by the MDT restart below leaves a file that
-	# returns EIO, and such a file cannot be unlinked by name, nor can its
-	# FID be read back.  Whether the survivor is f or g depends on how far
-	# the rename got, so offer both.  Registered before the restart so
-	# that it runs after it.
-	stack_trap 'rm -rf $DIR1/$tdir > /dev/null 2>&1;
-		[[ -n "$T81W_FIDS" ]] &&
-			$LFS rmfid $MOUNT $T81W_FIDS > /dev/null 2>&1;
-		rm -rf $DIR1/$tdir > /dev/null 2>&1; :'
+	# A swap interrupted by the MDT restart leaves a file that returns
+	# EIO to unlink and to path2fid, so remove it by FID; the survivor may
+	# be f or g.  This runs after the restart, and under set -e, where one
+	# failing step would end the whole EXIT trap.
+	stack_trap 'rm -rf $DIR1/$tdir > /dev/null 2>&1 || true;
+		[[ -z "$T81W_FIDS" ]] ||
+			$LFS rmfid $MOUNT $T81W_FIDS > /dev/null 2>&1 || true;
+		rm -rf $DIR1/$tdir > /dev/null 2>&1 || true'
 	stack_trap "cleanup_rename_deadlock $wedged"
 
 	mkdir_on_mdt0 $DIR1/$tdir || error "(0) mkdir failed"
