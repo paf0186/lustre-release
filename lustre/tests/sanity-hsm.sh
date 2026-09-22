@@ -6670,6 +6670,84 @@ test_608b() {
 }
 run_test 608b "a layout setxattr must not wedge HSM restore completion"
 
+test_608c() {
+	(( MDS1_VERSION >= $(version_code 2.17.58) )) ||
+		skip "Need MDS version at least 2.17.58"
+	which swap_layouts_nogl > /dev/null 2>&1 ||
+		skip_env "no swap_layouts_nogl"
+
+	local wedged=$TMP/hsm_restore_swap.$$
+	local mdts=$(mdts_nodes)
+	local f1=$DIR/$tdir/$tfile.1
+	local f2=$DIR/$tdir/$tfile.2
+	local fid1
+	local fid2
+	local swappid
+	local restpid
+	local waited
+	local fl
+
+	# 10 MB at 1 MB/s: the first restore is still copying when the swap
+	# wakes and queues on it
+	copytool setup -b 1
+
+	mkdir_on_mdt0 $DIR/$tdir
+	# the restore locks its items in the order given, the swap in
+	# descending FID order, so the lower FID must be named first
+	dd if=/dev/zero of=$f1 bs=1M count=10 || error "(0) dd f1 failed"
+	dd if=/dev/zero of=$f2 bs=1M count=10 || error "(0) dd f2 failed"
+	fid1=$(path2fid $f1)
+	fid2=$(path2fid $f2)
+	[[ $(echo $fid1 | cut -d: -f1) == $(echo $fid2 | cut -d: -f1) ]] &&
+	(( $(echo $fid1 | cut -d: -f2) < $(echo $fid2 | cut -d: -f2) )) ||
+		error "(0) $fid1 does not sort below $fid2"
+
+	$LFS hsm_archive $f1 $f2 || error "(1) archive failed"
+	wait_request_state $fid1 ARCHIVE SUCCEED
+	wait_request_state $fid2 ARCHIVE SUCCEED
+	$LFS hsm_release $f1 || error "(2) release f1 failed"
+	$LFS hsm_release $f2 || error "(3) release f2 failed"
+	stat $f1 $f2 > /dev/null 2>&1
+
+	stack_trap "cleanup_hsm_split_lock $wedged"
+	touch $wedged
+
+	#define OBD_FAIL_MDS_SWAP_LAYOUTS_DELAY 0x2408
+	do_nodes $mdts "$LCTL set_param fail_val=5 fail_loc=0x80002408" \
+		> /dev/null
+
+	# the swap holds the higher FID and waits before asking for the lower
+	swap_layouts_nogl $f1 $f2 &
+	swappid=$!
+	waited=0
+	while (( waited < 30 )); do
+		fl=$(do_facet mds1 "$LCTL get_param -n fail_loc")
+		(( fl & 0x40000000 )) && break
+		sleep 1
+		waited=$((waited + 1))
+	done
+	(( waited < 30 )) || error "(4) the swap never parked"
+
+	# the restore takes the lower FID's layout and waits for the higher;
+	# the lower file's completion then queues behind the swap
+	$LFS hsm_restore $f1 $f2 &
+	restpid=$!
+
+	waited=0
+	while (( waited < 60 )) && { kill -0 $swappid 2> /dev/null ||
+				     kill -0 $restpid 2> /dev/null; }; do
+		sleep 1
+		waited=$((waited + 1))
+	done
+	if kill -0 $swappid 2> /dev/null || kill -0 $restpid 2> /dev/null; then
+		error "(5) a two-file restore and a layout swap deadlocked"
+	fi
+
+	rm -f $wedged
+	do_nodes $mdts "$LCTL set_param fail_loc=0 fail_val=0" > /dev/null
+}
+run_test 608c "a two-file restore must not cross a layout swap"
+
 complete_test $SECONDS
 check_and_cleanup_lustre
 exit_status
