@@ -2978,6 +2978,9 @@ relock:
 		if (rc < 0)
 			GOTO(out_put_new, rc);
 
+		/* hold between the two child locks */
+		CFS_FAIL_TIMEOUT(OBD_FAIL_MDS_RENAME_CHILD_DELAY, 20);
+
 		/* Check if @msrcdir is subdir of @mnew, before locking child
 		 * to avoid reverse locking.
 		 */
