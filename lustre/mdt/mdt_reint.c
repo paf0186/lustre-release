@@ -2765,6 +2765,10 @@ static int mdt_lock_two_dirs(struct mdt_thread_info *info,
 
 	CFS_FAIL_TIMEOUT(OBD_FAIL_MDS_RENAME, 5);
 
+	/* hold between the two parents, with only the first one taken */
+	CFS_FAIL_TIMEOUT(OBD_FAIL_MDS_RENAME_PARENT_DELAY,
+			 cfs_fail_val ? cfs_fail_val : 20);
+
 	if (mfirstdir != mseconddir) {
 		rc = mdt_parent_lock(info, mseconddir, lh_seconddirp,
 				     secondname, LCK_PW);
@@ -3100,6 +3104,9 @@ lock_bfl:
 					    MDS_INODELOCK_XATTR);
 		if (rc < 0)
 			GOTO(out_unlock_new, rc);
+
+		/* hold between the two child locks */
+		CFS_FAIL_TIMEOUT(OBD_FAIL_MDS_RENAME_CHILD_DELAY, 20);
 
 		/* save version after locking */
 		mdt_version_get_save(info, mold, 2);
