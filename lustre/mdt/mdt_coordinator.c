@@ -1785,6 +1785,10 @@ static int hsm_cdt_request_completed(struct mdt_thread_info *mti,
 
 		cdt_restore_handle_del(mti, cdt, &car->car_hai.hai_fid);
 		if (!IS_ERR_OR_NULL(obj)) {
+			/* an UPDATE|XATTR waiter would queue the flush
+			 * behind it, so drop XATTR first
+			 */
+			mdt_object_unlock(mti, obj, mdlh, 1);
 			/* flush UPDATE lock so attributes are upadated */
 			lh = &mti->mti_lh[MDT_LH_OLD];
 			mdt_object_lock(mti, obj, lh, MDS_INODELOCK_UPDATE,
