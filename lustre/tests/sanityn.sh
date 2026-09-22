@@ -8405,6 +8405,83 @@ test_81aj() {
 }
 run_test 81aj "a rename must not cross a chmod sweep and an rmdir"
 
+test_81ak() {
+	(( MDS1_VERSION >= $(version_code 2.17.58) )) ||
+		skip "Need MDS version at least 2.17.58"
+
+	local wedged=$TMP/rename_stat_retry.$$
+	local mdts=$(mdts_nodes)
+	# a full_name_hash collision, as in 81z
+	local nd=2vbcbaaa
+	local nf=7pbtbaaa
+	local preempts
+	local waited
+	local fd
+	local fa
+	local pidr
+	local pids
+
+	mkdir -p $MOUNT3 && mount_client $MOUNT3 ||
+		skip_env "cannot mount a third client"
+	stack_trap "umount_client $MOUNT3"
+	stack_trap "cleanup_rename_deadlock $wedged"
+
+	mkdir_on_mdt0 $DIR1/$tdir || error "(0) mkdir failed"
+	$LFS mkdir -i 0 $DIR1/$tdir/D0 || error "(1) mkdir D0 failed"
+	$LFS mkdir -i 0 $DIR1/$tdir/A || error "(2) mkdir A failed"
+	mv $DIR1/$tdir/D0 $DIR1/$tdir/A/$nd || error "(3) mv D failed"
+	touch $DIR1/$tdir/A/$nf || error "(4) touch failed"
+
+	fd=$($LFS path2fid $DIR1/$tdir/A/$nd | tr -d '[]' | cut -d: -f2)
+	fa=$($LFS path2fid $DIR1/$tdir/A | tr -d '[]' | cut -d: -f2)
+	(( fd < fa )) || error "(5) fid(D) $fd >= fid(A) $fa"
+
+	# both stats' names must be cold, each on its own mount
+	ls -d $DIR2/$tdir/A $DIR3/$tdir/A > /dev/null 2>&1
+	cancel_lru_locks mdc
+
+	touch $wedged
+	do_nodes $mdts "$LCTL set_param mdt.*.md_stats=clear" > /dev/null
+	# without the ONCE bit the hold fires on the retry pass as well
+	#define OBD_FAIL_MDS_RENAME_PARENT_DELAY 0x2409
+	do_nodes $mdts "$LCTL set_param fail_val=25 fail_loc=0x2409" \
+		> /dev/null
+
+	mrename $DIR1/$tdir/A/$nf $DIR1/$tdir/A/$nd/new > /dev/null 2>&1 &
+	pidr=$!
+	sleep 2
+	# the first stat is refused past: the rename gives up its locks
+	stat $DIR2/$tdir/A/$nd > /dev/null 2>&1 &
+
+	waited=0
+	while (( waited < 60 )); do
+		preempts=$(rename_stat_sum rename_preempts)
+		(( preempts > 0 )) && break
+		sleep 1
+		waited=$((waited + 1))
+	done
+	(( preempts > 0 )) || error "(6) the rename was never refused"
+	sleep 2
+
+	# the second arrives while the retry holds D and waits to take A
+	stat $DIR3/$tdir/A/$nd > /dev/null 2>&1 &
+	pids=$!
+
+	waited=0
+	while (( waited < 90 )) && { kill -0 $pidr 2> /dev/null ||
+				     kill -0 $pids 2> /dev/null; }; do
+		sleep 1
+		waited=$((waited + 1))
+	done
+	if kill -0 $pidr 2> /dev/null || kill -0 $pids 2> /dev/null; then
+		error "(7) a stat during a rename's retry deadlocked it"
+	fi
+
+	rm -f $wedged
+	do_nodes $mdts "$LCTL set_param fail_loc=0 fail_val=0" > /dev/null
+}
+run_test 81ak "a stat during a rename's retry must not cross it in a bucket"
+
 test_82() {
 	[[ "$MDS1_VERSION" -gt $(version_code 2.6.91) ]] ||
 		skip "Need MDS version at least 2.6.92"
