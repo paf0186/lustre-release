@@ -6609,6 +6609,67 @@ test_608a() {
 }
 run_test 608a "a setxattr must not wedge HSM restore completion (XATTR/UPDATE)"
 
+cleanup_hsm_lov_setxattr() {
+	local pid=$1
+	local waited=0
+
+	# the cycle ends when the coordinator times out the restore
+	while (( waited < 180 )) && kill -0 $pid 2> /dev/null; do
+		sleep 1
+		waited=$((waited + 1))
+	done
+	kill -9 $pid 2> /dev/null || true
+}
+
+test_608b() {
+	(( MDS1_VERSION >= $(version_code 2.17.58) )) ||
+		skip "Need MDS version at least 2.17.58"
+
+	local f=$DIR/$tdir/$tfile
+	local fid
+	local setpid
+	local waited
+
+	# 20 MB at 1 MB/s keeps the restore running for 20 s
+	copytool setup -b 1
+
+	mkdir_on_mdt0 $DIR/$tdir
+	dd if=/dev/zero of=$f bs=1M count=20 || error "(0) dd failed"
+	fid=$(path2fid $f)
+	$LFS hsm_archive $f || error "(1) archive failed"
+	wait_request_state $fid ARCHIVE SUCCEED
+	$LFS hsm_release $f || error "(2) release failed"
+	check_hsm_flags $f "0x0000000d"
+	stat $f > /dev/null 2>&1
+
+	stack_trap "set_hsm_param active_request_timeout \
+		    $(get_hsm_param active_request_timeout)" EXIT
+	set_hsm_param active_request_timeout 90
+
+	$LFS hsm_restore $f || error "(3) restore request failed"
+	wait_request_state $fid RESTORE STARTED
+
+	# a lustre.lov.* setxattr takes UPDATE|LAYOUT|XATTR and queues behind
+	# the restore's LAYOUT; the completion's XATTR then queues behind it
+	setfattr -n lustre.lov.set.flags -v 0x0000000000000000 $f \
+		> /dev/null 2>&1 &
+	setpid=$!
+	stack_trap "cleanup_hsm_lov_setxattr $setpid"
+
+	waited=0
+	while (( waited < 60 )) &&
+	      { kill -0 $setpid 2> /dev/null ||
+		[[ $(get_request_state $fid RESTORE) != SUCCEED ]]; }; do
+		sleep 1
+		waited=$((waited + 1))
+	done
+	if kill -0 $setpid 2> /dev/null ||
+	   [[ $(get_request_state $fid RESTORE) != SUCCEED ]]; then
+		error "(4) a restore deadlocked behind a layout setxattr"
+	fi
+}
+run_test 608b "a layout setxattr must not wedge HSM restore completion"
+
 complete_test $SECONDS
 check_and_cleanup_lustre
 exit_status
