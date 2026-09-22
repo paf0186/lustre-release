@@ -6829,6 +6829,97 @@ test_608d() {
 }
 run_test 608d "coordinator start-up must not cross a layout swap"
 
+test_608e() {
+	(( MDS1_VERSION >= $(version_code 2.17.58) )) ||
+		skip "Need MDS version at least 2.17.58"
+	which swap_layouts_nogl > /dev/null 2>&1 ||
+		skip_env "no swap_layouts_nogl"
+
+	local wedged=$TMP/hsm_complete_swap_rename.$$
+	local mdts=$(mdts_nodes)
+	local f=$DIR/$tdir/$tfile
+	local s=$DIR/$tdir/$tfile.src
+	local fid
+	local sfid
+	local swappid
+	local renpid
+	local waited
+	local fl
+
+	copytool setup
+
+	# the rename locks the victim first when it has the lower FID
+	mkdir_on_mdt0 $DIR/$tdir
+	fid=$(create_small_file $f)
+	sfid=$(create_small_file $s)
+	[[ $(echo $fid | cut -d: -f1) == $(echo $sfid | cut -d: -f1) ]] &&
+	(( $(echo $fid | cut -d: -f2) < $(echo $sfid | cut -d: -f2) )) ||
+		error "(0) $fid does not sort below $sfid"
+
+	$LFS hsm_archive $f || error "(1) archive failed"
+	wait_request_state $fid ARCHIVE SUCCEED
+	$LFS hsm_release $f || error "(2) release failed"
+	stat $f $s > /dev/null 2>&1
+
+	stack_trap "cleanup_hsm_split_lock $wedged"
+	touch $wedged
+
+	#define OBD_FAIL_MDS_HSM_COMPLETE_DELAY 0x240a
+	do_nodes $mdts "$LCTL set_param fail_val=300 fail_loc=0x8000240a" \
+		> /dev/null
+	$LFS hsm_restore $f || error "(3) restore request failed"
+
+	# the completion parks holding the victim's XATTR lock
+	waited=0
+	while (( waited < 60 )); do
+		fl=$(do_facet mds1 "$LCTL get_param -n fail_loc")
+		(( fl & 0x40000000 )) && break
+		sleep 1
+		waited=$((waited + 1))
+	done
+	(( waited < 60 )) || error "(4) restore completion never parked"
+
+	# switch, never clear: a zero fail_loc releases the completion
+	#define OBD_FAIL_MDS_SWAP_LAYOUTS_DELAY 0x2408
+	do_nodes $mdts "$LCTL set_param fail_val=300 fail_loc=0x80002408" \
+		> /dev/null
+
+	# the swap holds the source and waits before asking for the victim
+	swap_layouts_nogl $f $s &
+	swappid=$!
+	waited=0
+	while (( waited < 30 )); do
+		fl=$(do_facet mds1 "$LCTL get_param -n fail_loc")
+		(( fl == 0xc0002408 )) && break
+		sleep 1
+		waited=$((waited + 1))
+	done
+	(( waited < 30 )) || error "(5) the swap never parked"
+
+	# the rename holds the victim and waits for the source
+	mrename $s $f > /dev/null 2>&1 &
+	renpid=$!
+	sleep 3
+
+	# release both: the completion wants the victim's UPDATE, the swap
+	# the victim's XATTR
+	do_nodes $mdts "$LCTL set_param fail_loc=0" > /dev/null
+
+	waited=0
+	while (( waited < 60 )) && { kill -0 $swappid 2> /dev/null ||
+				     kill -0 $renpid 2> /dev/null; }; do
+		sleep 1
+		waited=$((waited + 1))
+	done
+	if kill -0 $swappid 2> /dev/null || kill -0 $renpid 2> /dev/null; then
+		error "(6) restore completion, a swap and a rename deadlocked"
+	fi
+
+	rm -f $wedged
+	do_nodes $mdts "$LCTL set_param fail_loc=0 fail_val=0" > /dev/null
+}
+run_test 608e "restore completion must not cross a swap and a rename"
+
 complete_test $SECONDS
 check_and_cleanup_lustre
 exit_status
