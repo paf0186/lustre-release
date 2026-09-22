@@ -8206,6 +8206,94 @@ test_81ah() {
 }
 run_test 81ah "a layout swap and a link must not stall behind a statahead"
 
+test_81ai() {
+	(( MDSCOUNT >= 2 )) || skip "needs >= 2 MDTs"
+	(( MDS1_VERSION >= $(version_code 2.17.58) )) ||
+		skip "Need MDS version at least 2.17.58"
+
+	local wedged=$TMP/rename_cross_mdt_lookup.$$
+	local mdts=$(mdts_nodes)
+	local waited
+	local evb
+	local eva
+	local dseq
+	local qseq
+	local pide
+	local pidc
+	local pidr
+
+	mkdir -p $MOUNT3 && mount_client $MOUNT3 ||
+		skip_env "cannot mount a third client"
+	stack_trap "umount_client $MOUNT3"
+	stack_trap "cleanup_rename_deadlock $wedged"
+
+	# P, Q and the entry of d on MDT1; d itself and f on MDT0
+	$LFS mkdir -i 1 $DIR1/$tdir || error "(0) mkdir failed"
+	$LFS mkdir -i 1 $DIR1/$tdir/P || error "(1) mkdir P failed"
+	$LFS mkdir -i 1 $DIR1/$tdir/Q || error "(2) mkdir Q failed"
+	$LFS mkdir -i 0 $DIR1/$tdir/P/d || error "(3) mkdir P/d failed"
+	touch $DIR1/$tdir/P/d/f || error "(4) touch failed"
+
+	# the file rename must take d before Q
+	dseq=$($LFS path2fid $DIR1/$tdir/P/d | tr -d '[]' | cut -d: -f1)
+	qseq=$($LFS path2fid $DIR1/$tdir/Q | tr -d '[]' | cut -d: -f1)
+	(( dseq < qseq )) || error "(5) fid(d) $dseq >= fid(Q) $qseq"
+
+	stat $DIR1/$tdir/{P,Q,P/d,P/d/f} > /dev/null 2>&1
+	stat $DIR2/$tdir/{P,Q,P/d,P/d/f} > /dev/null 2>&1
+	# $DIR3 must not have looked up P/d: its stat has to be cold
+	stat $DIR3/$tdir/P > /dev/null 2>&1
+
+	evb=$(dmesg | grep -c "was evicted by")
+	touch $wedged
+	#define OBD_FAIL_MDS_RENAME_PARENT_DELAY 0x2409
+	do_nodes $mdts "$LCTL set_param fail_val=90 fail_loc=0x80002409" \
+		> /dev/null
+
+	# the file rename holds d on MDT0 and waits before asking for Q
+	mrename $DIR2/$tdir/P/d/f $DIR2/$tdir/Q/x > /dev/null 2>&1 &
+	pide=$!
+	wait_update_facet mds2 "$LCTL get_param -n fail_loc" \
+		"$((0xc0002409))" 30 || error "(6) the file rename did not park"
+
+	# the cold stat keeps d's LOOKUP on MDT1 while its getattr on MDT0
+	# queues behind the file rename
+	stat $DIR3/$tdir/P/d > /dev/null 2>&1 &
+	pidc=$!
+	sleep 4
+	kill -0 $pidc 2> /dev/null || error "(7) the stat did not queue on d"
+
+	# switch, never clear: a zero fail_loc releases the parked rename
+	#define OBD_FAIL_MDS_RENAME_PARENTS_DELAY 0x240c
+	do_nodes $mdts "$LCTL set_param fail_val=20 fail_loc=0x8000240c" \
+		> /dev/null
+	mrename $DIR1/$tdir/P/d $DIR1/$tdir/Q/x > /dev/null 2>&1 &
+	pidr=$!
+	wait_update_facet mds2 "$LCTL get_param -n fail_loc" \
+		"$((0xc000240c))" 30 ||
+		error "(8) the directory rename did not park"
+
+	waited=0
+	while (( waited < 200 )) && { kill -0 $pide 2> /dev/null ||
+				      kill -0 $pidc 2> /dev/null ||
+				      kill -0 $pidr 2> /dev/null; }; do
+		sleep 1
+		waited=$((waited + 1))
+	done
+	if kill -0 $pide 2> /dev/null || kill -0 $pidc 2> /dev/null ||
+	   kill -0 $pidr 2> /dev/null; then
+		error "(9) a cross-MDT stat and two renames wedged"
+	fi
+
+	eva=$(dmesg | grep -c "was evicted by")
+	(( eva == evb )) ||
+		error "(10) a client was evicted to break the cycle"
+
+	rm -f $wedged
+	do_nodes $mdts "$LCTL set_param fail_loc=0 fail_val=0" > /dev/null
+}
+run_test 81ai "a cross-MDT stat and two renames must not deadlock"
+
 test_82() {
 	[[ "$MDS1_VERSION" -gt $(version_code 2.6.91) ]] ||
 		skip "Need MDS version at least 2.6.92"
