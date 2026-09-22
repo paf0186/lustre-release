@@ -2698,6 +2698,10 @@ static int mdt_lock_two_dirs(struct mdt_thread_info *info,
 
 	OBD_FAIL_TIMEOUT(OBD_FAIL_MDS_RENAME, 5);
 
+	/* hold between the two parents, with only the first one taken */
+	OBD_FAIL_TIMEOUT(OBD_FAIL_MDS_RENAME_PARENT_DELAY,
+			 cfs_fail_val ? cfs_fail_val : 20);
+
 	if (mfirstdir != mseconddir) {
 		rc = mdt_object_lock_save(info, mseconddir, lh_seconddirp, 1,
 					  cos_incompat);
