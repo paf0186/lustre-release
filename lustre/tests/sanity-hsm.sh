@@ -6748,6 +6748,87 @@ test_608c() {
 }
 run_test 608c "a two-file restore must not cross a layout swap"
 
+test_608d() {
+	(( MDS1_VERSION >= $(version_code 2.17.58) )) ||
+		skip "Need MDS version at least 2.17.58"
+	which swap_layouts_nogl > /dev/null 2>&1 ||
+		skip_env "no swap_layouts_nogl"
+
+	local wedged=$TMP/hsm_cdt_start_swap.$$
+	local mdts=$(mdts_nodes)
+	local f1=$DIR/$tdir/$tfile.1
+	local f2=$DIR/$tdir/$tfile.2
+	local fid1
+	local fid2
+	local swappid
+	local cdtpid
+	local waited
+	local fl
+
+	copytool setup
+
+	mkdir_on_mdt0 $DIR/$tdir
+	fid1=$(create_small_file $f1)
+	fid2=$(create_small_file $f2)
+	[[ $(echo $fid1 | cut -d: -f1) == $(echo $fid2 | cut -d: -f1) ]] &&
+	(( $(echo $fid1 | cut -d: -f2) < $(echo $fid2 | cut -d: -f2) )) ||
+		error "(0) $fid1 does not sort below $fid2"
+
+	$LFS hsm_archive $f1 $f2 || error "(1) archive failed"
+	wait_request_state $fid1 ARCHIVE SUCCEED
+	wait_request_state $fid2 ARCHIVE SUCCEED
+	$LFS hsm_release $f1 || error "(2) release f1 failed"
+	$LFS hsm_release $f2 || error "(3) release f2 failed"
+	stat $f1 $f2 > /dev/null 2>&1
+
+	# the coordinator re-takes the pending restores' layout locks at
+	# start-up in log order, so the lower FID is registered first
+	cdt_disable
+	$LFS hsm_restore $f1 || error "(4) restore f1 failed"
+	wait_request_state $fid1 RESTORE WAITING
+	$LFS hsm_restore $f2 || error "(5) restore f2 failed"
+	wait_request_state $fid2 RESTORE WAITING
+	cdt_shutdown
+
+	stack_trap "cleanup_hsm_split_lock $wedged"
+	touch $wedged
+
+	#define OBD_FAIL_MDS_SWAP_LAYOUTS_DELAY 0x2408
+	do_nodes $mdts "$LCTL set_param fail_val=10 fail_loc=0x80002408" \
+		> /dev/null
+
+	# the swap holds the higher FID and waits before asking for the lower
+	swap_layouts_nogl $f1 $f2 &
+	swappid=$!
+	waited=0
+	while (( waited < 30 )); do
+		fl=$(do_facet mds1 "$LCTL get_param -n fail_loc")
+		(( fl & 0x40000000 )) && break
+		sleep 1
+		waited=$((waited + 1))
+	done
+	(( waited < 30 )) || error "(6) the swap never parked"
+
+	# start-up takes the lower FID's layout and waits for the higher
+	do_facet mds1 "$LCTL set_param mdt.*.hsm_control=enabled" > /dev/null &
+	cdtpid=$!
+
+	waited=0
+	while (( waited < 60 )) && { kill -0 $swappid 2> /dev/null ||
+				     kill -0 $cdtpid 2> /dev/null; }; do
+		sleep 1
+		waited=$((waited + 1))
+	done
+	if kill -0 $swappid 2> /dev/null || kill -0 $cdtpid 2> /dev/null; then
+		error "(7) coordinator start-up and a layout swap deadlocked"
+	fi
+
+	rm -f $wedged
+	do_nodes $mdts "$LCTL set_param fail_loc=0 fail_val=0" > /dev/null
+	cdt_enable
+}
+run_test 608d "coordinator start-up must not cross a layout swap"
+
 complete_test $SECONDS
 check_and_cleanup_lustre
 exit_status
