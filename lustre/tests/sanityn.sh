@@ -8654,6 +8654,59 @@ test_81am() {
 }
 run_test 81am "a rename out of the child must not cross the stripe locker"
 
+test_81an() {
+	local mdts=$(mdts_nodes)
+	local pid1
+	local pid2
+	local fx
+	local fy
+	local waited
+	local wedged=$TMP/rename_hardlink_deadlock.$$
+
+	stack_trap "cleanup_rename_deadlock $wedged"
+
+	# X = d1/10 = d2/2 and Y = d2/10 = d2/11: each rename's target is a
+	# name of the other's source (LU-15491)
+	mkdir_on_mdt0 $DIR1/$tdir || error "(0) mkdir failed"
+	mkdir $DIR1/$tdir/d1 $DIR1/$tdir/d2 || error "(1) mkdir failed"
+	echo x > $DIR1/$tdir/d1/10 && ln $DIR1/$tdir/d1/10 $DIR1/$tdir/d2/2 ||
+		error "(2) X failed"
+	echo y > $DIR1/$tdir/d2/10 && ln $DIR1/$tdir/d2/10 $DIR1/$tdir/d2/11 ||
+		error "(3) Y failed"
+	fx=$($LFS path2fid $DIR1/$tdir/d1/10)
+	fy=$($LFS path2fid $DIR1/$tdir/d2/10)
+	stat $DIR1/$tdir/d1/10 $DIR1/$tdir/d2/{2,10,11} > /dev/null
+	stat $DIR2/$tdir/d1/10 $DIR2/$tdir/d2/{2,10,11} > /dev/null
+
+	touch $wedged
+	#define OBD_FAIL_MDS_RENAME 0x153
+	# both park between their parent locks, before any child lock: a
+	# rename re-looks-up its target, and that lookup would queue behind
+	# the other rename's source lock
+	do_nodes $mdts "$LCTL set_param fail_loc=0x153" > /dev/null
+	mrename $DIR1/$tdir/d1/10 $DIR1/$tdir/d2/10 > /dev/null 2>&1 &
+	pid1=$!
+	mrename $DIR2/$tdir/d2/11 $DIR2/$tdir/d2/2 > /dev/null 2>&1 &
+	pid2=$!
+	sleep 2
+	# switch, never clear: each wakes, takes its source and holds
+	#define OBD_FAIL_MDS_RENAME_CHILD_DELAY 0x2407
+	do_nodes $mdts "$LCTL set_param fail_val=10 fail_loc=0x2407" > /dev/null
+
+	waited=0
+	while (( waited < 60 )) && { kill -0 $pid1 2> /dev/null ||
+				     kill -0 $pid2 2> /dev/null; }; do
+		sleep 1
+		waited=$((waited + 1))
+	done
+	if kill -0 $pid1 2> /dev/null || kill -0 $pid2 2> /dev/null; then
+		error "(4) renames of $fx and $fy deadlocked"
+	fi
+	rm -f $wedged
+	do_nodes $mdts "$LCTL set_param fail_loc=0 fail_val=0" > /dev/null
+}
+run_test 81an "renames between two hard-linked files must not deadlock"
+
 test_82() {
 	[[ "$MDS1_VERSION" -gt $(version_code 2.6.91) ]] ||
 		skip "Need MDS version at least 2.6.92"
