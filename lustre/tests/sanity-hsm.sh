@@ -5732,6 +5732,403 @@ test_606() {
 }
 run_test 606 "llog_reader groks changelog fields"
 
+cleanup_hsm_split_lock() {
+	local wedged=$1
+	local mdts=$(comma_list $(mdts_nodes))
+
+	do_nodes $mdts "$LCTL set_param fail_loc=0 fail_val=0" > /dev/null 2>&1
+	[[ -e $wedged ]] || return 0
+
+	rm -f $wedged
+	# the restore completion and the bridging operation hold each other's
+	# split XATTR/UPDATE (or LAYOUT/XATTR) locks and nothing times them
+	# out, so MDT0 has to be brought back before the rest of the suite runs
+	stop mds1 -f
+	start mds1 $(mdsdevname 1) $MDS_MOUNT_OPTS
+	wait_recovery_complete mds1
+}
+
+cleanup_hsm_lov_setxattr() {
+	local pid=$1
+	local waited=0
+
+	# the cycle ends when the coordinator times out the restore
+	while (( waited < 180 )) && kill -0 $pid 2> /dev/null; do
+		sleep 1
+		waited=$((waited + 1))
+	done
+	kill -9 $pid 2> /dev/null || true
+}
+
+test_608a() {
+
+	local wedged=$TMP/hsm_split_lock.$$
+	local mdts=$(comma_list $(mdts_nodes))
+	# DIR2 is mounted nouser_xattr, so the bridging setxattr must go
+	# through DIR1
+	local f=$DIR/$tdir/$tfile
+	local fid
+	local setpid
+	local waited
+	local fl
+
+	copytool setup
+
+	mkdir_on_mdt0 $DIR/$tdir
+	fid=$(create_small_file $f)
+
+	$LFS hsm_archive $f || error "(1) archive failed"
+	wait_request_state $fid ARCHIVE SUCCEED
+	$LFS hsm_release $f || error "(2) release failed"
+	check_hsm_flags $f "0x0000000d"
+
+	# warm the setxattr's path so its own lookup does not queue on the
+	# parent bucket instead of the file's locks
+	stat $f > /dev/null 2>&1
+
+	stack_trap "cleanup_hsm_split_lock $wedged"
+
+	#define OBD_FAIL_MDS_HSM_COMPLETE_DELAY 0x240a
+	# the restore completion holds the file's XATTR lock here, before it
+	# reacquires the UPDATE lock at the end
+	do_nodes $mdts "$LCTL set_param fail_val=300 fail_loc=0x8000240a" \
+		> /dev/null
+
+	$LFS hsm_restore $f || error "(3) restore request failed"
+
+	# wait for the completion to park at the fail point holding XATTR;
+	# the CFS_FAILED bit (0x40000000) in fail_loc, printed in decimal,
+	# marks that a thread reached it
+	waited=0
+	while (( waited < 60 )); do
+		fl=$(do_facet mds1 "$LCTL get_param -n fail_loc")
+		(( fl & 0x40000000 )) && break
+		sleep 1
+		waited=$((waited + 1))
+	done
+	(( waited < 60 )) || error "(4) restore completion never parked"
+
+	# a plain setxattr bridges XATTR and UPDATE in one enqueue and wedges
+	# between the completion's two acquisitions
+	setfattr -n user.x -v y $f &
+	setpid=$!
+	sleep 2
+
+	touch $wedged
+	# release the parked completion; it now reacquires UPDATE behind the
+	# queued setxattr
+	do_nodes $mdts "$LCTL set_param fail_loc=0" > /dev/null
+
+	# neither the restore nor the setxattr can finish once the cycle forms
+	waited=0
+	while (( waited < 60 )) &&
+	      { kill -0 $setpid 2> /dev/null ||
+		[[ $(get_request_state $fid RESTORE) != SUCCEED ]]; }; do
+		sleep 1
+		waited=$((waited + 1))
+	done
+	if kill -0 $setpid 2> /dev/null ||
+	   [[ $(get_request_state $fid RESTORE) != SUCCEED ]]; then
+		error "(5) HSM restore completion deadlocked behind a setxattr"
+	fi
+
+	wait $setpid || error "(6) setxattr failed"
+	rm -f $wedged
+	do_nodes $mdts "$LCTL set_param fail_loc=0 fail_val=0" > /dev/null
+}
+run_test 608a "a setxattr must not wedge HSM restore completion (XATTR/UPDATE)"
+
+test_608b() {
+
+	local f=$DIR/$tdir/$tfile
+	local fid
+	local setpid
+	local waited
+
+	# 20 MB at 1 MB/s keeps the restore running for 20 s
+	copytool setup -b 1
+
+	mkdir_on_mdt0 $DIR/$tdir
+	dd if=/dev/zero of=$f bs=1M count=20 || error "(0) dd failed"
+	fid=$(path2fid $f)
+	$LFS hsm_archive $f || error "(1) archive failed"
+	wait_request_state $fid ARCHIVE SUCCEED
+	$LFS hsm_release $f || error "(2) release failed"
+	check_hsm_flags $f "0x0000000d"
+	stat $f > /dev/null 2>&1
+
+	stack_trap "set_hsm_param active_request_timeout \
+		    $(get_hsm_param active_request_timeout)" EXIT
+	set_hsm_param active_request_timeout 90
+
+	$LFS hsm_restore $f || error "(3) restore request failed"
+	wait_request_state $fid RESTORE STARTED
+
+	# a lustre.lov.* setxattr takes UPDATE|LAYOUT|XATTR and queues behind
+	# the restore's LAYOUT; the completion's XATTR then queues behind it
+	setfattr -n lustre.lov.set.flags -v 0x0000000000000000 $f \
+		> /dev/null 2>&1 &
+	setpid=$!
+	stack_trap "cleanup_hsm_lov_setxattr $setpid"
+
+	waited=0
+	while (( waited < 60 )) &&
+	      { kill -0 $setpid 2> /dev/null ||
+		[[ $(get_request_state $fid RESTORE) != SUCCEED ]]; }; do
+		sleep 1
+		waited=$((waited + 1))
+	done
+	if kill -0 $setpid 2> /dev/null ||
+	   [[ $(get_request_state $fid RESTORE) != SUCCEED ]]; then
+		error "(4) a restore deadlocked behind a layout setxattr"
+	fi
+}
+run_test 608b "a layout setxattr must not wedge HSM restore completion"
+
+test_608c() {
+	which swap_layouts_nogl > /dev/null 2>&1 ||
+		skip_env "no swap_layouts_nogl"
+
+	local wedged=$TMP/hsm_restore_swap.$$
+	local mdts=$(comma_list $(mdts_nodes))
+	local f1=$DIR/$tdir/$tfile.1
+	local f2=$DIR/$tdir/$tfile.2
+	local fid1
+	local fid2
+	local swappid
+	local restpid
+	local waited
+	local fl
+
+	# 10 MB at 1 MB/s: the first restore is still copying when the swap
+	# wakes and queues on it
+	copytool setup -b 1
+
+	mkdir_on_mdt0 $DIR/$tdir
+	# the restore locks its items in the order given, the swap in
+	# descending FID order, so the lower FID must be named first
+	dd if=/dev/zero of=$f1 bs=1M count=10 || error "(0) dd f1 failed"
+	dd if=/dev/zero of=$f2 bs=1M count=10 || error "(0) dd f2 failed"
+	fid1=$(path2fid $f1)
+	fid2=$(path2fid $f2)
+	[[ $(echo $fid1 | cut -d: -f1) == $(echo $fid2 | cut -d: -f1) ]] &&
+	(( $(echo $fid1 | cut -d: -f2) < $(echo $fid2 | cut -d: -f2) )) ||
+		error "(0) $fid1 does not sort below $fid2"
+
+	$LFS hsm_archive $f1 $f2 || error "(1) archive failed"
+	wait_request_state $fid1 ARCHIVE SUCCEED
+	wait_request_state $fid2 ARCHIVE SUCCEED
+	$LFS hsm_release $f1 || error "(2) release f1 failed"
+	$LFS hsm_release $f2 || error "(3) release f2 failed"
+	stat $f1 $f2 > /dev/null 2>&1
+
+	stack_trap "cleanup_hsm_split_lock $wedged"
+	touch $wedged
+
+	#define OBD_FAIL_MDS_SWAP_LAYOUTS_DELAY 0x2408
+	do_nodes $mdts "$LCTL set_param fail_val=5 fail_loc=0x80002408" \
+		> /dev/null
+
+	# the swap holds the higher FID and waits before asking for the lower
+	swap_layouts_nogl $f1 $f2 &
+	swappid=$!
+	waited=0
+	while (( waited < 30 )); do
+		fl=$(do_facet mds1 "$LCTL get_param -n fail_loc")
+		(( fl & 0x40000000 )) && break
+		sleep 1
+		waited=$((waited + 1))
+	done
+	(( waited < 30 )) || error "(4) the swap never parked"
+
+	# the restore takes the lower FID's layout and waits for the higher;
+	# the lower file's completion then queues behind the swap
+	$LFS hsm_restore $f1 $f2 &
+	restpid=$!
+
+	waited=0
+	while (( waited < 60 )) && { kill -0 $swappid 2> /dev/null ||
+				     kill -0 $restpid 2> /dev/null; }; do
+		sleep 1
+		waited=$((waited + 1))
+	done
+	if kill -0 $swappid 2> /dev/null || kill -0 $restpid 2> /dev/null; then
+		error "(5) a two-file restore and a layout swap deadlocked"
+	fi
+
+	rm -f $wedged
+	do_nodes $mdts "$LCTL set_param fail_loc=0 fail_val=0" > /dev/null
+}
+run_test 608c "a two-file restore must not cross a layout swap"
+
+test_608d() {
+	which swap_layouts_nogl > /dev/null 2>&1 ||
+		skip_env "no swap_layouts_nogl"
+
+	local wedged=$TMP/hsm_cdt_start_swap.$$
+	local mdts=$(comma_list $(mdts_nodes))
+	local f1=$DIR/$tdir/$tfile.1
+	local f2=$DIR/$tdir/$tfile.2
+	local fid1
+	local fid2
+	local swappid
+	local cdtpid
+	local waited
+	local fl
+
+	copytool setup
+
+	mkdir_on_mdt0 $DIR/$tdir
+	fid1=$(create_small_file $f1)
+	fid2=$(create_small_file $f2)
+	[[ $(echo $fid1 | cut -d: -f1) == $(echo $fid2 | cut -d: -f1) ]] &&
+	(( $(echo $fid1 | cut -d: -f2) < $(echo $fid2 | cut -d: -f2) )) ||
+		error "(0) $fid1 does not sort below $fid2"
+
+	$LFS hsm_archive $f1 $f2 || error "(1) archive failed"
+	wait_request_state $fid1 ARCHIVE SUCCEED
+	wait_request_state $fid2 ARCHIVE SUCCEED
+	$LFS hsm_release $f1 || error "(2) release f1 failed"
+	$LFS hsm_release $f2 || error "(3) release f2 failed"
+	stat $f1 $f2 > /dev/null 2>&1
+
+	# the coordinator re-takes the pending restores' layout locks at
+	# start-up in log order, so the lower FID is registered first
+	cdt_disable
+	$LFS hsm_restore $f1 || error "(4) restore f1 failed"
+	wait_request_state $fid1 RESTORE WAITING
+	$LFS hsm_restore $f2 || error "(5) restore f2 failed"
+	wait_request_state $fid2 RESTORE WAITING
+	cdt_shutdown
+
+	stack_trap "cleanup_hsm_split_lock $wedged"
+	touch $wedged
+
+	#define OBD_FAIL_MDS_SWAP_LAYOUTS_DELAY 0x2408
+	do_nodes $mdts "$LCTL set_param fail_val=10 fail_loc=0x80002408" \
+		> /dev/null
+
+	# the swap holds the higher FID and waits before asking for the lower
+	swap_layouts_nogl $f1 $f2 &
+	swappid=$!
+	waited=0
+	while (( waited < 30 )); do
+		fl=$(do_facet mds1 "$LCTL get_param -n fail_loc")
+		(( fl & 0x40000000 )) && break
+		sleep 1
+		waited=$((waited + 1))
+	done
+	(( waited < 30 )) || error "(6) the swap never parked"
+
+	# start-up takes the lower FID's layout and waits for the higher
+	do_facet mds1 "$LCTL set_param mdt.*.hsm_control=enabled" > /dev/null &
+	cdtpid=$!
+
+	waited=0
+	while (( waited < 60 )) && { kill -0 $swappid 2> /dev/null ||
+				     kill -0 $cdtpid 2> /dev/null; }; do
+		sleep 1
+		waited=$((waited + 1))
+	done
+	if kill -0 $swappid 2> /dev/null || kill -0 $cdtpid 2> /dev/null; then
+		error "(7) coordinator start-up and a layout swap deadlocked"
+	fi
+
+	rm -f $wedged
+	do_nodes $mdts "$LCTL set_param fail_loc=0 fail_val=0" > /dev/null
+	cdt_enable
+}
+run_test 608d "coordinator start-up must not cross a layout swap"
+
+test_608e() {
+	which swap_layouts_nogl > /dev/null 2>&1 ||
+		skip_env "no swap_layouts_nogl"
+
+	local wedged=$TMP/hsm_complete_swap_rename.$$
+	local mdts=$(comma_list $(mdts_nodes))
+	local f=$DIR/$tdir/$tfile
+	local s=$DIR/$tdir/$tfile.src
+	local fid
+	local sfid
+	local swappid
+	local renpid
+	local waited
+	local fl
+
+	copytool setup
+
+	# the rename locks the victim first when it has the lower FID
+	mkdir_on_mdt0 $DIR/$tdir
+	fid=$(create_small_file $f)
+	sfid=$(create_small_file $s)
+	[[ $(echo $fid | cut -d: -f1) == $(echo $sfid | cut -d: -f1) ]] &&
+	(( $(echo $fid | cut -d: -f2) < $(echo $sfid | cut -d: -f2) )) ||
+		error "(0) $fid does not sort below $sfid"
+
+	$LFS hsm_archive $f || error "(1) archive failed"
+	wait_request_state $fid ARCHIVE SUCCEED
+	$LFS hsm_release $f || error "(2) release failed"
+	stat $f $s > /dev/null 2>&1
+
+	stack_trap "cleanup_hsm_split_lock $wedged"
+	touch $wedged
+
+	#define OBD_FAIL_MDS_HSM_COMPLETE_DELAY 0x240a
+	do_nodes $mdts "$LCTL set_param fail_val=300 fail_loc=0x8000240a" \
+		> /dev/null
+	$LFS hsm_restore $f || error "(3) restore request failed"
+
+	# the completion parks holding the victim's XATTR lock
+	waited=0
+	while (( waited < 60 )); do
+		fl=$(do_facet mds1 "$LCTL get_param -n fail_loc")
+		(( fl & 0x40000000 )) && break
+		sleep 1
+		waited=$((waited + 1))
+	done
+	(( waited < 60 )) || error "(4) restore completion never parked"
+
+	# switch, never clear: a zero fail_loc releases the completion
+	#define OBD_FAIL_MDS_SWAP_LAYOUTS_DELAY 0x2408
+	do_nodes $mdts "$LCTL set_param fail_val=300 fail_loc=0x80002408" \
+		> /dev/null
+
+	# the swap holds the source and waits before asking for the victim
+	swap_layouts_nogl $f $s &
+	swappid=$!
+	waited=0
+	while (( waited < 30 )); do
+		fl=$(do_facet mds1 "$LCTL get_param -n fail_loc")
+		(( fl == 0xc0002408 )) && break
+		sleep 1
+		waited=$((waited + 1))
+	done
+	(( waited < 30 )) || error "(5) the swap never parked"
+
+	# the rename holds the victim and waits for the source
+	mrename $s $f > /dev/null 2>&1 &
+	renpid=$!
+	sleep 3
+
+	# release both: the completion wants the victim's UPDATE, the swap
+	# the victim's XATTR
+	do_nodes $mdts "$LCTL set_param fail_loc=0" > /dev/null
+
+	waited=0
+	while (( waited < 60 )) && { kill -0 $swappid 2> /dev/null ||
+				     kill -0 $renpid 2> /dev/null; }; do
+		sleep 1
+		waited=$((waited + 1))
+	done
+	if kill -0 $swappid 2> /dev/null || kill -0 $renpid 2> /dev/null; then
+		error "(6) restore completion, a swap and a rename deadlocked"
+	fi
+
+	rm -f $wedged
+	do_nodes $mdts "$LCTL set_param fail_loc=0 fail_val=0" > /dev/null
+}
+run_test 608e "restore completion must not cross a swap and a rename"
+
 complete $SECONDS
 check_and_cleanup_lustre
 exit_status
