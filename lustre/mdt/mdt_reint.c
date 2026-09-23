@@ -2940,6 +2940,10 @@ lock_parents:
 		    !S_ISDIR(lu_object_attr(&mold->mot_obj)))
 			GOTO(out_put_new, rc = -EISDIR);
 
+		/* hold after the target lookup and before either child lock */
+		CFS_FAIL_TIMEOUT(OBD_FAIL_MDS_RENAME_TARGET_DELAY,
+				 cfs_fail_val ? cfs_fail_val : 20);
+
 		lh_oldp = &info->mti_lh[MDT_LH_OLD];
 		lh_newp = &info->mti_lh[MDT_LH_NEW];
 
