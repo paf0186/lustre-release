@@ -3015,6 +3015,10 @@ lock_parents:
 		mdt_enoent_version_save(info, 3);
 	}
 
+	/* hold with the child locks taken and before the rename */
+	CFS_FAIL_TIMEOUT(OBD_FAIL_MDS_RENAME_CHILDREN_DELAY,
+			 cfs_fail_val ? cfs_fail_val : 20);
+
 	/* step 5: rename it */
 	mdt_reint_init_ma(info, ma);
 
