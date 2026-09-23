@@ -5981,6 +5981,8 @@ cleanup_rename_deadlock() {
 	stop mds1 -f
 	start mds1 $(mdsdevname 1) $MDS_MOUNT_OPTS
 	wait_recovery_complete mds1
+	# the next test's first lookups must not race the reconnect
+	wait_clients_import_state ${CLIENTS:-$HOSTNAME} mds1 FULL
 }
 
 test_81v() {
