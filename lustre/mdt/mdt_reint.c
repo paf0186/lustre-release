@@ -1224,6 +1224,10 @@ static int mdt_reint_unlink(struct mdt_thread_info *info,
 	if (rc != 0)
 		GOTO(put_parent, rc);
 
+	/* hold with the parent locked and before the child is */
+	CFS_FAIL_TIMEOUT(OBD_FAIL_MDS_UNLINK_PARENT_DELAY,
+			 cfs_fail_val ? cfs_fail_val : 20);
+
 	if (!mdt_object_remote(mp)) {
 		rc = mdt_version_get_check_save(info, mp, 0);
 		if (rc)
@@ -2685,6 +2689,10 @@ static int mdt_lock_two_dirs(struct mdt_thread_info *info,
 
 	CFS_FAIL_TIMEOUT(OBD_FAIL_MDS_RENAME, 5);
 
+	/* hold between the two parents, with only the first one taken */
+	CFS_FAIL_TIMEOUT(OBD_FAIL_MDS_RENAME_PARENT_DELAY,
+			 cfs_fail_val ? cfs_fail_val : 20);
+
 	if (mfirstdir != mseconddir) {
 		rc = mdt_parent_lock(info, mseconddir, lh_seconddirp,
 				     secondname, LCK_PW);
@@ -2888,6 +2896,10 @@ lock_bfl:
 	CFS_FAIL_TIMEOUT(OBD_FAIL_MDS_RENAME4, 5);
 	CFS_FAIL_TIMEOUT(OBD_FAIL_MDS_RENAME2, 5);
 
+	/* hold with both parents locked and before either child is */
+	CFS_FAIL_TIMEOUT(OBD_FAIL_MDS_RENAME_PARENTS_DELAY,
+			 cfs_fail_val ? cfs_fail_val : 20);
+
 	/* find mold object. */
 	fid_zero(old_fid);
 	rc = mdt_lookup_version_check(info, msrcdir, &rr->rr_name, old_fid, 2);
@@ -2990,6 +3002,10 @@ lock_bfl:
 		    !S_ISDIR(lu_object_attr(&mold->mot_obj)))
 			GOTO(out_put_new, rc = -EISDIR);
 
+		/* hold after the target lookup and before either child lock */
+		CFS_FAIL_TIMEOUT(OBD_FAIL_MDS_RENAME_TARGET_DELAY,
+				 cfs_fail_val ? cfs_fail_val : 20);
+
 		lh_oldp = &info->mti_lh[MDT_LH_OLD];
 		lh_newp = &info->mti_lh[MDT_LH_NEW];
 
@@ -3016,6 +3032,9 @@ lock_bfl:
 					    MDS_INODELOCK_XATTR);
 		if (rc < 0)
 			GOTO(out_unlock_new, rc);
+
+		/* hold between the two child locks */
+		CFS_FAIL_TIMEOUT(OBD_FAIL_MDS_RENAME_CHILD_DELAY, 20);
 
 		/* save version after locking */
 		mdt_version_get_save(info, mold, 2);
@@ -3075,6 +3094,10 @@ lock_bfl:
 	 * 3b. re-get the child locks if they were dropped in 3a
 	 * See LU-17427
 	 */
+	/* hold with the child locks taken and before the BFL try */
+	CFS_FAIL_TIMEOUT(OBD_FAIL_MDS_RENAME_CHILDREN_DELAY,
+			 cfs_fail_val ? cfs_fail_val : 20);
+
 	if (need_bfl && !got_bfl && mdt->mdt_enable_rename_trylock) {
 		struct lu_fid old_fid_backup = *old_fid;
 

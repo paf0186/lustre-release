@@ -372,6 +372,9 @@ int mdt_dir_layout_update(struct mdt_thread_info *info)
 			GOTO(put_pobj, rc);
 	}
 
+	/* hold between the parent lock and the stripe sweep */
+	CFS_FAIL_TIMEOUT(OBD_FAIL_MDS_DIR_LAYOUT_DELAY, 20);
+
 	/* lock object */
 	lhc = &info->mti_lh[MDT_LH_CHILD];
 	rc = mdt_object_stripes_lock(info, pobj, obj, lhc, einfo,

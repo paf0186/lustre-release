@@ -298,6 +298,13 @@ int mdt_batch(struct tgt_session_info *tsi)
 			}
 
 			tsi->tsi_batch_idx = handled_update_count;
+			/* hold the batch part way through, with the locks of
+			 * the sub-requests already handled exported to the
+			 * client and the rest still to run
+			 */
+			if (handled_update_count ==
+			    (cfs_fail_val ? cfs_fail_val : 1))
+				CFS_FAIL_TIMEOUT(OBD_FAIL_MDS_BATCH_DELAY, 25);
 			rc = h->th_act(tsi);
 next:
 			/*

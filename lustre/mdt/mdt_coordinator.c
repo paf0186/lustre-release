@@ -1542,6 +1542,10 @@ static int hsm_cdt_request_completed(struct mdt_thread_info *mti,
 	/* find object by FID, mdt_hsm_get_md_hsm() returns obj or err
 	 * if error/removed continue anyway to get correct reporting done */
 	obj = mdt_hsm_get_md_hsm(mti, &car->car_hai.hai_fid, &mh);
+
+	/* hold before the layout lock of the restore handle is given back */
+	CFS_FAIL_TIMEOUT(OBD_FAIL_MDS_HSM_COMPLETE_DELAY,
+			 cfs_fail_val ? cfs_fail_val : 30);
 	/* we will update MD HSM only if needed */
 	is_mh_changed = false;
 
