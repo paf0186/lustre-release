@@ -7058,6 +7058,7 @@ test_81r() {
 		skip "Need MDS version at least 2.17.58"
 
 	local wedged=$TMP/rename_retry_load.$$
+	local load=$TMP/rename_retry_churn.$$
 	local mdts=$(mdts_nodes)
 	local waited
 	local churn
@@ -7079,14 +7080,15 @@ test_81r() {
 
 	# the rename lock keeps other renames out, not creates and unlinks,
 	# so the retry has to be able to wait for one of those
-	touch $wedged
-	while [[ -e $wedged ]]; do
+	touch $wedged $load
+	while [[ -e $load ]]; do
 		createmany -o $DIR2/$tdir/p/c. 50 > /dev/null 2>&1
 		unlinkmany $DIR2/$tdir/p/c. 50 > /dev/null 2>&1
 		createmany -o $DIR2/$tdir/p/a/c. 50 > /dev/null 2>&1
 		unlinkmany $DIR2/$tdir/p/a/c. 50 > /dev/null 2>&1
 	done &
 	churn=$!
+	stack_trap "rm -f $load; kill $churn 2> /dev/null || true"
 
 	#define OBD_FAIL_MDS_RENAME 0x153
 	do_nodes $mdts "$LCTL set_param fail_loc=0x153" > /dev/null
@@ -7105,14 +7107,16 @@ test_81r() {
 	do_nodes $mdts "$LCTL set_param fail_loc=0" > /dev/null
 	if kill -0 $pid1 2> /dev/null ||
 	   kill -0 $pid2 2> /dev/null; then
-		rm -f $wedged
-		wait $churn 2> /dev/null
+		# the churn cannot finish on a wedged MDT: stop it, and leave
+		# $wedged for the cleanup to restart the MDT
+		rm -f $load
+		kill $churn 2> /dev/null
 		error "(7) renames deadlocked under metadata load"
 	fi
 	wait $pid1 || error "(8) first rename failed under load"
 	wait $pid2 || error "(9) second rename failed under load"
 
-	rm -f $wedged
+	rm -f $wedged $load
 	wait $churn 2> /dev/null
 }
 run_test 81r "a rename that gives up a parent must not fail on the retry"
