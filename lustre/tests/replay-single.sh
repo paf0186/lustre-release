@@ -5532,6 +5532,9 @@ test_205c() {
 
 	[[ -e $DIR/$tdir/p/a/$tfile && ! -e $DIR/$tdir/p/$tfile ]] ||
 		error "(8) a completed rename was lost in recovery"
+	# a name whose object is gone is listed but fails to stat
+	[[ "$(ls $DIR/$tdir/p)" == "a" ]] ||
+		error "(9) p lists $(ls $DIR/$tdir/p | tr '\n' ' ')"
 }
 run_test 205c "a replayed rename must not be lost when two MDTs recover"
 
