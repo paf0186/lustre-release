@@ -8052,7 +8052,14 @@ test_81r() {
 }
 run_test 81r "a rename that gives up a parent must not fail on the retry"
 
+# the rename series' try, which gives up a contended lock and retries
+rename_try_supported() {
+	do_facet mds1 "$LCTL list_param mdt.*.enable_parallel_rename_remote" \
+		> /dev/null 2>&1
+}
+
 test_81s() {
+	rename_try_supported || skip "needs the rename try"
 
 	local mdts=$(mdts_nodes)
 	local count=20
@@ -8748,6 +8755,7 @@ test_81ad() {
 run_test 81ad "a cross-dir rename must not stall behind a batched statahead"
 
 test_81af() {
+	rename_try_supported || skip "needs the rename try"
 
 	local wedged=$TMP/rename_pinned_master_retry.$$
 	local mdts=$(mdts_nodes)
@@ -8849,6 +8857,7 @@ test_81af() {
 run_test 81af "a stat during a rename's retry must not pin it"
 
 test_81ag() {
+	rename_try_supported || skip "needs the rename try"
 
 	local wedged=$TMP/rename_stat_retry.$$
 	local mdts=$(mdts_nodes)
@@ -9175,6 +9184,7 @@ test_81aj() {
 run_test 81aj "a rename must not cross a chmod sweep and an rmdir"
 
 test_81ak() {
+	rename_try_supported || skip "needs the rename try"
 
 	local wedged=$TMP/rename_stat_retry.$$
 	local mdts=$(mdts_nodes)
