@@ -2970,6 +2970,9 @@ lock_parents:
 		if (rc < 0)
 			GOTO(out_unlock_new, rc);
 
+		/* hold between the two child locks */
+		CFS_FAIL_TIMEOUT(OBD_FAIL_MDS_RENAME_CHILD_DELAY, 20);
+
 		/* save version after locking */
 		mdt_version_get_save(info, mold, 2);
 
