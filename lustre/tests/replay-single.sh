@@ -5409,6 +5409,132 @@ test_203() {
 }
 run_test 203 "resend can hit original request"
 
+replay_two_renames_wedged() {
+	local failpid=$1
+	local waited=0
+
+	while (( waited < 150 )) && kill -0 $failpid 2> /dev/null; do
+		sleep 5
+		waited=$((waited + 5))
+	done
+	kill -0 $failpid 2> /dev/null || return 1
+	do_facet mds1 "$LCTL get_param -n mdt.*MDT0000.recovery_status" |
+		grep ^status
+	do_facet mds2 "$LCTL get_param -n mdt.*MDT0001.recovery_status" |
+		grep ^status
+	return 0
+}
+
+test_205a() {
+	(( MDSCOUNT >= 2 )) || skip "needs >= 2 MDTs"
+
+	local mdts=$(mdts_nodes)
+	local fa
+	local fp
+	local failpid
+
+	# a on MDT0 inside p on MDT1: fid(a) sorts below fid(p) while a is
+	# the descendant, the world of sanityn test_81n
+	mkdir_on_mdt0 $DIR/$tdir || error "(0) mkdir failed"
+	$LFS mkdir -i 0 $DIR/$tdir/a || error "(1) mkdir a failed"
+	$LFS mkdir -i 1 $DIR/$tdir/p || error "(2) mkdir p failed"
+	mv $DIR/$tdir/a $DIR/$tdir/p/a || error "(3) mv failed"
+	touch $DIR/$tdir/p/a/$tfile $DIR/$tdir/p/$tfile ||
+		error "(4) touch failed"
+	fa=$($LFS path2fid $DIR/$tdir/p/a | tr -d '[]')
+	fp=$($LFS path2fid $DIR/$tdir/p | tr -d '[]')
+	(( ${fa%%:*} < ${fp%%:*} )) || error "(5) fid(a) $fa >= fid(p) $fp"
+	do_nodes $mdts "$LCTL set_param -n osd*.*MDT*.force_sync=1"
+
+	replay_barrier mds1
+	replay_barrier mds2
+	# the first is served on MDT1, the second on MDT0; both are replayed
+	mrename $DIR/$tdir/p/a/$tfile $DIR/$tdir/p/$tfile ||
+		error "(6) first rename failed"
+	mrename $DIR/$tdir/p/$tfile $DIR/$tdir/p/a/$tfile ||
+		error "(7) second rename failed"
+
+	#define OBD_FAIL_MDS_RENAME 0x153
+	# every rename, replays included, sleeps 5 s between its parents
+	do_nodes $mdts "$LCTL set_param fail_loc=0x153" > /dev/null
+	stack_trap "do_nodes $mdts \"$LCTL set_param fail_loc=0\" > /dev/null"
+	fail mds1,mds2 &
+	failpid=$!
+
+	replay_two_renames_wedged $failpid &&
+		error "(8) recovery deadlocked; restart both MDTs"
+	wait $failpid || error "(9) failover failed"
+	[[ -e $DIR/$tdir/p/a/$tfile ]] || error "(10) $tfile is not in p/a"
+}
+run_test 205a "two MDTs replaying inverse cross-MDT renames"
+
+test_205b() {
+	(( MDSCOUNT >= 2 )) || skip "needs >= 2 MDTs"
+
+	local mdts=$(mdts_nodes)
+	# a full_name_hash collision, so each rename's names share a bucket
+	# with the other's in both directories
+	local n1=2vbcbaaa
+	local n2=7pbtbaaa
+	local failpid
+
+	# unrelated directories on two MDTs; before 2.17.0 both replays lock
+	# their source parent first
+	mkdir_on_mdt0 $DIR/$tdir || error "(0) mkdir failed"
+	$LFS mkdir -i 0 $DIR/$tdir/D || error "(1) mkdir D failed"
+	$LFS mkdir -i 1 $DIR/$tdir/E || error "(2) mkdir E failed"
+	touch $DIR/$tdir/D/$n1 $DIR/$tdir/E/$n2 || error "(3) touch failed"
+	do_nodes $mdts "$LCTL set_param -n osd*.*MDT*.force_sync=1"
+
+	replay_barrier mds1
+	replay_barrier mds2
+	mrename $DIR/$tdir/D/$n1 $DIR/$tdir/E/$n1 ||
+		error "(4) first rename failed"
+	mrename $DIR/$tdir/E/$n2 $DIR/$tdir/D/$n2 ||
+		error "(5) second rename failed"
+
+	#define OBD_FAIL_MDS_RENAME 0x153
+	do_nodes $mdts "$LCTL set_param fail_loc=0x153" > /dev/null
+	stack_trap "do_nodes $mdts \"$LCTL set_param fail_loc=0\" > /dev/null"
+	fail mds1,mds2 &
+	failpid=$!
+
+	replay_two_renames_wedged $failpid &&
+		error "(6) recovery deadlocked; restart both MDTs"
+	wait $failpid || error "(7) failover failed"
+	[[ -e $DIR/$tdir/E/$n1 && -e $DIR/$tdir/D/$n2 ]] ||
+		error "(8) a replayed rename is missing"
+}
+run_test 205b "two MDTs replaying renames between unrelated directories"
+
+test_205c() {
+	(( MDSCOUNT >= 2 )) || skip "needs >= 2 MDTs"
+
+	local mdts=$(mdts_nodes)
+
+	mkdir_on_mdt0 $DIR/$tdir || error "(0) mkdir failed"
+	$LFS mkdir -i 0 $DIR/$tdir/a || error "(1) mkdir a failed"
+	$LFS mkdir -i 1 $DIR/$tdir/p || error "(2) mkdir p failed"
+	mv $DIR/$tdir/a $DIR/$tdir/p/a || error "(3) mv failed"
+	touch $DIR/$tdir/p/a/$tfile $DIR/$tdir/p/$tfile ||
+		error "(4) touch failed"
+	# only the two renames may be replayed
+	do_nodes $mdts "$LCTL set_param -n osd*.*MDT*.force_sync=1"
+
+	replay_barrier mds1
+	replay_barrier mds2
+	# the second rename's replay on MDT0 depends on the first's on MDT1
+	mrename $DIR/$tdir/p/a/$tfile $DIR/$tdir/p/$tfile ||
+		error "(5) first rename failed"
+	mrename $DIR/$tdir/p/$tfile $DIR/$tdir/p/a/$tfile ||
+		error "(6) second rename failed"
+	fail mds1,mds2 || error "(7) failover failed"
+
+	[[ -e $DIR/$tdir/p/a/$tfile && ! -e $DIR/$tdir/p/$tfile ]] ||
+		error "(8) a completed rename was lost in recovery"
+}
+run_test 205c "a replayed rename must not be lost when two MDTs recover"
+
 complete_test $SECONDS
 check_and_cleanup_lustre
 exit_status
