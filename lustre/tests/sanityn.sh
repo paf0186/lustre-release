@@ -6497,6 +6497,8 @@ cleanup_rename_deadlock() {
 	stop mds1 -f
 	start mds1 $(mdsdevname 1) $MDS_MOUNT_OPTS
 	wait_recovery_complete mds1
+	# the next test's first lookups must not race the reconnect
+	wait_clients_import_state ${CLIENTS:-$HOSTNAME} mds1 FULL
 }
 
 test_81j() {
@@ -7889,7 +7891,8 @@ test_81ab() {
 		(( i < j )) || { k=$i; i=$j; j=$k; }
 		(( i >= 1 && j <= batch )) && fits=true && break
 	done
-	$fits || skip_env "no filler suffix put the pair in the first batch"
+	$fits ||
+		skip_env "pair not in the first batch: ${SA_ORDER[*]}"
 	echo "order: ${SA_ORDER[*]}, unlink ${SA_ORDER[i]}, partner at $j"
 
 	statahead_pin_writer $((j - 1)) unlink $DIR2/$tdir/${SA_ORDER[i]}
@@ -7951,7 +7954,8 @@ test_81ad() {
 		(( i < j )) || { k=$i; i=$j; j=$k; }
 		(( i >= 1 && j <= batch )) && fits=true && break
 	done
-	$fits || skip_env "no filler suffix put the pair in the first batch"
+	$fits ||
+		skip_env "pair not in the first batch: ${SA_ORDER[*]}"
 	echo "order: ${SA_ORDER[*]}, rename ${SA_ORDER[i]}, partner at $j"
 
 	statahead_pin_writer $((j - 1)) \
