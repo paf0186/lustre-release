@@ -5611,6 +5611,63 @@ test_205c() {
 }
 run_test 205c "a replayed rename must not be lost when two MDTs recover"
 
+test_205d() {
+	(( MDSCOUNT >= 2 )) || skip "needs >= 2 MDTs"
+
+	local mdts=$(mdts_nodes)
+	local mdt0=$(facet_svc mds1)
+	local evicted
+	local statpid
+	local failpid
+	local start
+	local waited
+
+	# d on MDT0 names c on MDT1: a lookup of d/n is served on MDT0 and
+	# its getattr on MDT1
+	mkdir_on_mdt0 $DIR/$tdir || error "(0) mkdir failed"
+	$LFS mkdir -i 0 $DIR/$tdir/d || error "(1) mkdir d failed"
+	$LFS mkdir -i 1 $DIR/$tdir/e || error "(2) mkdir e failed"
+	touch $DIR/$tdir/e/c || error "(3) touch failed"
+	mv $DIR/$tdir/e/c $DIR/$tdir/d/n || error "(4) mv failed"
+	[[ $($LFS getstripe -m $DIR/$tdir/d/n) == 1 ]] ||
+		error "(5) d/n is not on MDT1"
+	do_nodes $mdts "$LCTL set_param -n osd*.*MDT*.force_sync=1"
+
+	# the rename is served on MDT1 and replayed there; it needs c's
+	# LOOKUP lock on MDT0
+	replay_barrier mds2
+	mrename $DIR/$tdir/d/n $DIR/$tdir/e/m || error "(6) rename failed"
+	cancel_lru_locks mdc
+	evicted=$(do_facet mds1 "dmesg | grep -c 'evicting client.*$mdt0'")
+
+	fail mds2 &
+	failpid=$!
+	# facet_failover waits 10 s between the stop and the remount
+	sleep 3
+	stat $DIR2/$tdir/d/n > /dev/null 2>&1 &
+	statpid=$!
+	start=$SECONDS
+
+	waited=0
+	while (( waited < 600 )) && kill -0 $failpid 2> /dev/null; do
+		sleep 5
+		waited=$((waited + 5))
+	done
+	do_facet mds2 "$LCTL get_param -n mdt.*MDT0001.recovery_status" |
+		grep -E "^(status|recovery_duration|completed_clients|evicted)"
+	do_facet mds1 "dmesg | grep -E 'evict|callback timer' | tail -5"
+	kill -0 $failpid 2> /dev/null &&
+		error "(7) recovery still waits after $waited s"
+	wait $statpid
+	wait $failpid || error "(8) failover failed"
+	echo "recovery finished $((SECONDS - start)) s after the stat"
+	(( $(do_facet mds1 "dmesg | grep -c 'evicting client.*$mdt0'") >
+	   evicted )) &&
+		error "(9) MDT0 evicted the stat client to let recovery finish"
+	[[ -e $DIR/$tdir/e/m ]] || error "(10) the replayed rename is lost"
+}
+run_test 205d "a lookup pinned across a remote MDT's recovery"
+
 complete_test $SECONDS
 check_and_cleanup_lustre
 exit_status
