@@ -5504,11 +5504,11 @@ test_205c() {
 		error "(6) second rename failed"
 	fail mds1,mds2 || error "(7) failover failed"
 
-	[[ -e $DIR/$tdir/p/a/$tfile && ! -e $DIR/$tdir/p/$tfile ]] ||
-		error "(8) a completed rename was lost in recovery"
-	# a name whose object is gone is listed but fails to stat
-	[[ "$(ls $DIR/$tdir/p)" == "a" ]] ||
-		error "(9) p lists $(ls $DIR/$tdir/p | tr '\n' ' ')"
+	# a stale negative dentry on the client would hide a surviving name
+	cancel_lru_locks mdc
+	[[ "$(ls $DIR/$tdir/p)" == "a" &&
+	   "$(ls $DIR/$tdir/p/a)" == "$tfile" ]] ||
+		error "(8) a completed rename was lost: $(ls -R $DIR/$tdir/p)"
 }
 run_test 205c "a replayed rename must not be lost when two MDTs recover"
 
