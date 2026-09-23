@@ -9302,10 +9302,10 @@ test_81al() {
 	cancel_lru_locks mdc
 	fd=$($LFS path2fid $DIR1/$tdir/A/dst 2> /dev/null)
 	fk=$($LFS path2fid $DIR1/$tdir/A/keep 2> /dev/null)
-	[[ $fk == $fv ]] ||
+	[[ "$fk" == "$fv" ]] ||
 		error "(9) keep no longer names $fv"
-	[[ $fd == $fs2 && ! -e $MOUNT/.lustre/fid/$fs1 ]] ||
-		[[ $fd == $fs1 && ! -e $MOUNT/.lustre/fid/$fs2 ]] ||
+	[[ "$fd" == "$fs2" && ! -e $MOUNT/.lustre/fid/$fs1 ]] ||
+		[[ "$fd" == "$fs1" && ! -e $MOUNT/.lustre/fid/$fs2 ]] ||
 		error "(10) dst names $fd with both sources alive"
 	rm -f $damaged
 }
