@@ -2546,6 +2546,7 @@ static void handle_recovery_req(struct ptlrpc_thread *thread,
 	/* thread context */
 	lu_context_enter(&thread->t_env->le_ctx);
 	(void)handler(req);
+	ldlm_lockdep_ctx_end();
 	lu_context_exit(&thread->t_env->le_ctx);
 
 	req->rq_svc_thread->t_env->le_ses = NULL;

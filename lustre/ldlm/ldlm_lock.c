@@ -858,6 +858,8 @@ void ldlm_lock_decref_internal(struct ldlm_lock *lock, enum ldlm_mode mode)
 	ns = ldlm_lock_to_ns(lock);
 
 	ldlm_lock_decref_internal_nolock(lock, mode);
+	if (!lock->l_readers && !lock->l_writers)
+		ldlm_lockdep_release(lock);
 
 	if (((lock->l_flags & LDLM_FL_LOCAL) || lock->l_req_mode == LCK_GROUP) &&
 	    !lock->l_readers && !lock->l_writers) {
@@ -2740,6 +2742,7 @@ void ldlm_lock_mode_downgrade(struct ldlm_lock *lock, enum ldlm_mode new_mode)
 
 	lock->l_req_mode = new_mode;
 	ldlm_grant_lock(lock, NULL);
+	ldlm_lockdep_update(lock);
 	unlock_res_and_lock(lock);
 
 	ldlm_reprocess_all(lock->l_resource,

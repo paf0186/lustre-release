@@ -12,6 +12,19 @@
  */
 
 extern int ldlm_srv_namespace_nr;
+extern int ldlm_lockdep;
+void ldlm_lockdep_release(struct ldlm_lock *lock);
+void ldlm_lockdep_update(struct ldlm_lock *lock);
+unsigned long ldlm_lockdep_cycles(void);
+unsigned long ldlm_lockdep_rerequests(void);
+int ldlm_lockdep_set(int val);
+int ldlm_lockdep_new_epoch(const char *label);
+int ldlm_lockdep_epoch_show(char *buf, size_t size);
+void ldlm_lockdep_pause(bool pause);
+bool ldlm_lockdep_paused(void);
+int ldlm_lockdep_selftest(void);
+void ldlm_lockdep_debugfs(struct dentry *dir);
+void ldlm_lockdep_fini(void);
 extern int ldlm_cli_namespace_nr;
 extern struct mutex ldlm_srv_namespace_lock;
 extern struct list_head ldlm_srv_namespace_list;

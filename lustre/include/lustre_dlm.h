@@ -1864,6 +1864,23 @@ int ldlm_cli_enqueue_fini(struct obd_export *exp, struct req_capsule *pill,
 			  __u64 *flags, void *lvb, __u32 lvb_len,
 			  const struct lustre_handle *lockh, int rc,
 			  bool request_slot);
+
+/* what ldlm_lockdep_acquire() leaves for ldlm_lockdep_held() */
+struct ldlm_lockdep_token {
+	unsigned long	ldt_site;
+	__u32		ldt_epoch;
+};
+
+void ldlm_lockdep_acquire(struct ldlm_lockdep_token *tok,
+			  struct ldlm_namespace *ns,
+			  const struct ldlm_res_id *res, enum ldlm_mode mode,
+			  const union ldlm_policy_data *policy, __u64 flags,
+			  ldlm_completion_callback completion);
+void ldlm_lockdep_held(struct ldlm_lock *lock,
+		       const struct ldlm_lockdep_token *tok);
+void ldlm_lockdep_detach(const struct lustre_handle *lockh);
+void ldlm_lockdep_ctx_end(void);
+
 int ldlm_cli_enqueue_local(const struct lu_env *env,
 			   struct ldlm_namespace *ns,
 			   const struct ldlm_res_id *res_id,

@@ -496,6 +496,7 @@ int ldlm_cli_enqueue_local(const struct lu_env *env,
 			   const __u64 *client_cookie,
 			   struct lustre_handle *lockh)
 {
+	struct ldlm_lockdep_token ldt = { 0 };
 	struct ldlm_lock *lock;
 	int err;
 	const struct ldlm_callback_suite cbs = { .lcs_completion = completion,
@@ -544,6 +545,10 @@ int ldlm_cli_enqueue_local(const struct lu_env *env,
 		lock->l_req_extent = policy->l_extent;
 	}
 
+	if (type == LDLM_IBITS && policy)
+		ldlm_lockdep_acquire(&ldt, ns, res_id, mode, policy, *flags,
+				     completion);
+
 	err = ldlm_lock_enqueue(env, ns, &lock, policy, flags);
 	if (unlikely(err != ELDLM_OK))
 		GOTO(out, err);
@@ -553,6 +558,7 @@ int ldlm_cli_enqueue_local(const struct lu_env *env,
 
 	if (lock->l_completion_ast)
 		lock->l_completion_ast(lock, *flags, NULL);
+	ldlm_lockdep_held(lock, &ldt);
 
 	LDLM_DEBUG(lock, "client-side local enqueue handler, new lock created");
 	EXIT;

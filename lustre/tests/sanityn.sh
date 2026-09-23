@@ -7567,6 +7567,99 @@ test_122() {
 }
 run_test 122 "directory size is consistent across mounts"
 
+lockdep_param() {
+	do_facet mds1 $LCTL get_param -n ldlm.$1
+}
+
+lockdep_value() {
+	awk -v key="$1:" '$1 == key { print $2 }' <<< "$2"
+}
+
+lockdep_renames() {
+	mv $DIR/$tdir/A/f $DIR2/$tdir/B/f || error "($1) mv A/f B/f failed"
+	mv $DIR2/$tdir/B/f $DIR/$tdir/A/f || error "($1) mv B/f A/f failed"
+}
+
+test_123a() {
+	lockdep_param lockdep &> /dev/null || skip "MDS has no ldlm.lockdep"
+
+	local mdt=mdt.$FSNAME-MDT0000
+	local file=$(do_facet mds1 $LCTL get_param -n \
+		     $mdt.enable_parallel_rename_file)
+	local cross=$(do_facet mds1 $LCTL get_param -n \
+		      $mdt.enable_parallel_rename_crossdir)
+	local reports
+	local stats
+
+	# the BFL would serialise the two renames
+	do_facet mds1 $LCTL set_param $mdt.enable_parallel_rename_file=1 \
+		$mdt.enable_parallel_rename_crossdir=1
+	stack_trap "do_facet mds1 $LCTL set_param \
+		$mdt.enable_parallel_rename_file=$file \
+		$mdt.enable_parallel_rename_crossdir=$cross"
+
+	mkdir_on_mdt0 $DIR/$tdir || error "mkdir $tdir failed"
+	mkdir_on_mdt0 $DIR/$tdir/A || error "mkdir A failed"
+	mkdir_on_mdt0 $DIR/$tdir/B || error "mkdir B failed"
+	touch $DIR/$tdir/A/f || error "touch A/f failed"
+
+	do_facet mds1 $LCTL set_param ldlm.lockdep=1 ||
+		error "enable ldlm.lockdep failed"
+	stack_trap "do_facet mds1 $LCTL set_param ldlm.lockdep=0"
+
+	# FID order: both renames lock A's bucket before B's
+	do_facet mds1 $LCTL set_param ldlm.lockdep_epoch=$TESTNAME-fid
+	lockdep_renames 0
+	stats=$(lockdep_param lockdep_stats)
+	echo "$stats"
+	(( $(lockdep_value resource_edges "$stats") > 0 )) ||
+		error "(1) the renames recorded no edges"
+	(( $(lockdep_value complete "$stats") == 1 )) ||
+		error "(2) the check was incomplete"
+	(( $(lockdep_param lockdep_cycles) == 0 )) ||
+		error "(3) cycle reported for FID-ordered renames"
+
+	# unlink's DOM discard is not a second waiting request
+	do_facet mds1 $LCTL set_param ldlm.lockdep_epoch=$TESTNAME-dom
+	$LFS setstripe -E 1M -L mdt $DIR/$tdir/dom || error "setstripe failed"
+	dd if=/dev/zero of=$DIR/$tdir/dom bs=4k count=1 || error "dd failed"
+	rm $DIR2/$tdir/dom || error "rm dom failed"
+	lockdep_param lockdep_reports
+	(( $(lockdep_param lockdep_rerequests) == 0 )) ||
+		error "(4) rule 1 reported for unlink's DOM discard"
+
+	# with the fail point each rename locks its source parent first
+	do_facet mds1 $LCTL set_param ldlm.lockdep_epoch=$TESTNAME-abba
+	do_facet mds1 $LCTL set_param fail_timeout_skip=1
+	stack_trap "do_facet mds1 $LCTL set_param fail_loc=0 \
+		fail_timeout_skip=0"
+	#define OBD_FAIL_MDS_PDO_LOCK	0x145
+	do_facet mds1 $LCTL set_param fail_loc=0x145
+	lockdep_renames 5
+	do_facet mds1 $LCTL set_param fail_loc=0
+	reports=$(lockdep_param lockdep_reports)
+	echo "$reports"
+	(( $(lockdep_param lockdep_cycles) > 0 )) ||
+		error "(6) no cycle reported for the inverse renames"
+
+	local fa=$($LFS path2fid $DIR/$tdir/A | tr -d '[]')
+	local fb=$($LFS path2fid $DIR/$tdir/B | tr -d '[]')
+	local cycle=$(awk '/^report=/ { show = /check=resource/ &&
+		/category=conflict/ && /edges=2/ } show' <<< "$reports")
+
+	[[ "$cycle" == *"$fa"* && "$cycle" == *"$fb"* ]] ||
+		error "(7) no conflict cycle between A and B"
+}
+run_test 123a "lock order checker: inverse renames against controls"
+
+test_123b() {
+	lockdep_param lockdep &> /dev/null || skip "MDS has no ldlm.lockdep"
+
+	do_facet mds1 $LCTL set_param ldlm.lockdep_selftest=1 ||
+		error "self test failed, see the MDS console"
+}
+run_test 123b "lock order checker: graph search self test"
+
 test_200() {
 	remote_ost_nodsh && skip "remote OST with nodsh" && return
 

@@ -183,6 +183,7 @@ void ptlrpc_save_lock(struct ptlrpc_request *req, struct lustre_handle *lock,
 	rs->rs_locks[idx] = *lock;
 	rs->rs_difficult = 1;
 	rs->rs_no_ack = no_ack;
+	ldlm_lockdep_detach(lock);
 }
 EXPORT_SYMBOL(ptlrpc_save_lock);
 
@@ -2575,6 +2576,7 @@ static int ptlrpc_server_handle_request(struct ptlrpc_service_part *svcpt,
 		thread->t_env->le_ses = &request->rq_session;
 	}
 	svc->srv_ops.so_req_handler(request);
+	ldlm_lockdep_ctx_end();
 
 	ptlrpc_rqphase_move(request, RQ_PHASE_COMPLETE);
 

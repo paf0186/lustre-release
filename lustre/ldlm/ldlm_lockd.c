@@ -3344,7 +3344,97 @@ static ssize_t ldlm_enqueue_min_show(struct kobject *kobj,
 }
 LUSTRE_RO_ATTR(ldlm_enqueue_min);
 
+static ssize_t lockdep_show(struct kobject *kobj, struct attribute *attr,
+			    char *buf)
+{
+	return scnprintf(buf, PAGE_SIZE, "%d\n", READ_ONCE(ldlm_lockdep));
+}
+
+/* turning it off forgets every hold and report */
+static ssize_t lockdep_store(struct kobject *kobj, struct attribute *attr,
+			     const char *buffer, size_t count)
+{
+	bool val;
+	int rc;
+
+	rc = kstrtobool(buffer, &val);
+	if (rc)
+		return rc;
+	rc = ldlm_lockdep_set(val);
+	return rc ?: count;
+}
+LUSTRE_RW_ATTR(lockdep);
+
+static ssize_t lockdep_epoch_show(struct kobject *kobj, struct attribute *attr,
+				  char *buf)
+{
+	return ldlm_lockdep_epoch_show(buf, PAGE_SIZE);
+}
+
+/* start new graphs and reports under a label, keeping the holds */
+static ssize_t lockdep_epoch_store(struct kobject *kobj, struct attribute *attr,
+				   const char *buffer, size_t count)
+{
+	char label[48];
+	int rc;
+
+	strscpy(label, buffer, min(sizeof(label), count + 1));
+	rc = ldlm_lockdep_new_epoch(strim(label));
+	return rc ?: count;
+}
+LUSTRE_RW_ATTR(lockdep_epoch);
+
+static ssize_t lockdep_pause_show(struct kobject *kobj, struct attribute *attr,
+				  char *buf)
+{
+	return scnprintf(buf, PAGE_SIZE, "%d\n", ldlm_lockdep_paused());
+}
+
+static ssize_t lockdep_pause_store(struct kobject *kobj, struct attribute *attr,
+				   const char *buffer, size_t count)
+{
+	bool val;
+	int rc;
+
+	rc = kstrtobool(buffer, &val);
+	if (rc)
+		return rc;
+	ldlm_lockdep_pause(val);
+	return count;
+}
+LUSTRE_RW_ATTR(lockdep_pause);
+
+static ssize_t lockdep_cycles_show(struct kobject *kobj,
+				   struct attribute *attr, char *buf)
+{
+	return scnprintf(buf, PAGE_SIZE, "%lu\n", ldlm_lockdep_cycles());
+}
+LUSTRE_RO_ATTR(lockdep_cycles);
+
+static ssize_t lockdep_rerequests_show(struct kobject *kobj,
+				       struct attribute *attr, char *buf)
+{
+	return scnprintf(buf, PAGE_SIZE, "%lu\n", ldlm_lockdep_rerequests());
+}
+LUSTRE_RO_ATTR(lockdep_rerequests);
+
+static ssize_t lockdep_selftest_store(struct kobject *kobj,
+				      struct attribute *attr,
+				      const char *buffer, size_t count)
+{
+	int rc = ldlm_lockdep_selftest();
+
+	return rc ?: count;
+}
+LUSTRE_WO_ATTR(lockdep_selftest);
+
 static struct attribute *ldlm_attrs[] = {
+	&lustre_attr_lockdep.attr,
+	&lustre_attr_lockdep_epoch.attr,
+	&lustre_attr_lockdep_pause.attr,
+	&lustre_attr_lockdep_cycles.attr,
+	&lustre_attr_lockdep_rerequests.attr,
+	&lustre_attr_lockdep_selftest.attr,
 	&lustre_attr_dump_granted_max.attr,
 	&lustre_attr_cancel_unused_locks_before_replay.attr,
 #ifdef CONFIG_LUSTRE_FS_SERVER
@@ -3673,6 +3763,7 @@ void ldlm_exit(void)
 {
 	if (ldlm_refcount)
 		CERROR("ldlm_refcount is %d in %s\n", ldlm_refcount, __func__);
+	ldlm_lockdep_fini();
 	rcu_barrier();
 	kmem_cache_destroy(ldlm_resource_slab);
 	/*

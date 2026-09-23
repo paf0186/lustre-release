@@ -1,0 +1,113 @@
+.TH LDLM.LOCKDEP 4 2026-09-23 Lustre "Lustre Kernel Interfaces"
+.SH NAME
+ldlm.lockdep \- lock order checker for server inodebits locks
+.SH SYNOPSIS
+.SY
+.BI "lctl set_param ldlm.lockdep=" 0|1
+.SY
+.BI "lctl set_param ldlm.lockdep_epoch=" LABEL
+.SY
+.BI "lctl set_param ldlm.lockdep_pause=" 0|1
+.SY
+.B "lctl get_param ldlm.lockdep_cycles ldlm.lockdep_rerequests"
+.SY
+.B "lctl get_param ldlm.lockdep_stats ldlm.lockdep_reports"
+.SY
+.B "lctl get_param ldlm.lockdep_graph"
+.SY
+.B "lctl set_param ldlm.lockdep_selftest=1"
+.YS
+.SS PROPERTIES
+.TP
+.B Access Permissions
+.BR ldlm.lockdep ", " ldlm.lockdep_epoch ", " ldlm.lockdep_pause :
+.BR 644 " | " -rw-r--r--
+.br
+.BR ldlm.lockdep_cycles ", " ldlm.lockdep_rerequests ", "
+.BR ldlm.lockdep_stats ", " ldlm.lockdep_reports ", " ldlm.lockdep_graph :
+.BR 444 " | " -r--r--r--
+.br
+.BR ldlm.lockdep_selftest :
+.BR 200 " | " --w-------
+.TP
+.B Scope
+.br
+Global, on a server
+.TP
+.B Config
+.br
+Always present
+.TP
+.B Default
+.br
+.RB ldlm.lockdep= 0
+.SH DESCRIPTION
+The checker records, for each request handler or server thread, the
+inodebits locks it is granted on the local enqueue path and through OSP.
+A request that waits for its grant while others are held adds edges to a
+graph of call sites and to a graph of resources, and a new edge that
+closes a cycle is reported.
+A second waiting request on a resource already held is reported under
+rule 1 when it conflicts with the hold, or when a request that could be
+queued between them has been seen.
+Only mandatory bits are wanted, and tries and requests whose completion
+does not wait add no edges.
+The checker never blocks, fails or panics an operation; a test decides
+failure from the counters and the reports.
+It is meant for test systems: every enqueue takes a stack trace and a
+global lock while it is on.
+.TP
+.B ldlm.lockdep
+turns the checker on or off.
+Turning it off forgets every hold and report.
+.TP
+.B ldlm.lockdep_epoch
+starts new, empty graphs under
+.IR LABEL ,
+keeping the holds.
+Set the same label on every server before a test's actors run.
+Reading it shows the epoch number and label.
+.TP
+.B ldlm.lockdep_pause
+keeps tracking holds but adds nothing to the graphs.
+.TP
+.B ldlm.lockdep_cycles
+counts the epoch's class order, resource conflict and queue-bridged cycle
+reports.
+.TP
+.B ldlm.lockdep_rerequests
+counts the epoch's rule 1 reports that conflict with the hold or have a
+bridge.
+.TP
+.B ldlm.lockdep_stats
+shows the counts of each report category, the use of each bounded table,
+and every loss.
+.B complete: 1
+means that nothing was dropped in this epoch.
+.TP
+.B ldlm.lockdep_reports
+lists every report with its witness: the call sites, modes, bits and
+resources of each edge, each resource named with the target that owns its
+lock namespace.
+.TP
+.B ldlm.lockdep_graph
+streams both graphs, for merging the graphs of several servers.
+.TP
+.B ldlm.lockdep_selftest
+runs the graph searches on built graphs; the write fails if any case
+fails, and the console names it.
+.SH EXAMPLES
+Turn the checker on, start a labelled epoch, and read its cycle count:
+.EX
+.RB mds# " lctl set_param ldlm.lockdep=1"
+.RB mds# " lctl set_param ldlm.lockdep_epoch=sanityn-123a"
+.RB mds# " lctl get_param -n ldlm.lockdep_cycles"
+.EE
+.SH AVAILABILITY
+.B ldlm.lockdep
+is part of the
+.BR lustre (7)
+filesystem package since release 2.18.0.
+.\" commit v2_17_58
+.SH SEE ALSO
+.BR lctl (8)

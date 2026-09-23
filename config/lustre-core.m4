@@ -573,6 +573,30 @@ AC_DEFUN([LC_KEYRING_SEARCH_4ARGS], [
 ]) # LC_KEYRING_SEARCH_4ARGS
 
 #
+# LC_HAVE_STACK_TRACE_SAVE
+#
+# Kernel 5.2 commit e9b98e162aa5
+# stacktrace: Provide helpers for common stack trace operations
+# It is declared only with CONFIG_STACKTRACE.
+#
+AC_DEFUN([LC_SRC_HAVE_STACK_TRACE_SAVE], [
+	LB2_LINUX_TEST_SRC([stack_trace_save], [
+		#include <linux/stacktrace.h>
+	],[
+		unsigned long entries[4];
+
+		stack_trace_save(entries, 4, 0);
+	],[-Werror])
+])
+AC_DEFUN([LC_HAVE_STACK_TRACE_SAVE], [
+	LB2_MSG_LINUX_TEST_RESULT([if 'stack_trace_save()' is available],
+	[stack_trace_save], [
+		AC_DEFINE(HAVE_STACK_TRACE_SAVE, 1,
+			['stack_trace_save()' is available])
+	])
+]) # LC_HAVE_STACK_TRACE_SAVE
+
+#
 # LC_BIO_BI_PHYS_SEGMENTS
 #
 # kernel 5.3-rc1 commit 14ccb66b3f585b2bc21e7256c96090abed5a512c
@@ -3797,6 +3821,7 @@ AC_DEFUN([LC_PROG_LINUX_SRC], [
 
 	# 5.2
 	LC_SRC_KEYRING_SEARCH_4ARGS
+	LC_SRC_HAVE_STACK_TRACE_SAVE
 
 	# 5.3
 	LC_SRC_BIO_BI_PHYS_SEGMENTS
@@ -4018,6 +4043,7 @@ AC_DEFUN([LC_PROG_LINUX_RESULTS], [
 
 	# 5.2
 	LC_KEYRING_SEARCH_4ARGS
+	LC_HAVE_STACK_TRACE_SAVE
 
 	# 5.3
 	LC_BIO_BI_PHYS_SEGMENTS

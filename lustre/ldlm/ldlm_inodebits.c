@@ -493,6 +493,7 @@ int ldlm_inodebits_drop(struct ldlm_lock *lock, enum mds_ibits_locks to_drop)
 	ldlm_resource_unlink_lock(lock);
 	lock->l_policy_data.l_inodebits.bits &= ~to_drop;
 	ldlm_grant_lock_with_skiplist(lock);
+	ldlm_lockdep_update(lock);
 	RETURN(0);
 }
 EXPORT_SYMBOL(ldlm_inodebits_drop);

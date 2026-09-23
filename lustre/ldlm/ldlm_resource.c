@@ -74,6 +74,7 @@ int ldlm_debugfs_setup(void)
 						  ldlm_debugfs_dir);
 
 	ldebugfs_add_vars(ldlm_debugfs_dir, ldlm_debugfs_list, NULL);
+	ldlm_lockdep_debugfs(ldlm_debugfs_dir);
 
 	RETURN(0);
 }
