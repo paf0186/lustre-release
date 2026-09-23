@@ -90,6 +90,7 @@
 /statone
 /statx
 /swap_lock_test
+/swap_layouts_nogl
 /tchmod
 /test_brw
 /testreq

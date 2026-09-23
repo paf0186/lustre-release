@@ -1144,6 +1144,10 @@ relock:
 	if (rc != 0)
 		GOTO(put_parent, rc);
 
+	/* hold with the parent locked and before the child is */
+	CFS_FAIL_TIMEOUT(OBD_FAIL_MDS_UNLINK_PARENT_DELAY,
+			 cfs_fail_val ? cfs_fail_val : 20);
+
 	if (info->mti_spec.sp_cr_flags & MDS_OP_WITH_FID) {
 		*child_fid = *rr->rr_fid2;
 	} else {
@@ -2871,6 +2875,10 @@ relock:
 	OBD_FAIL_TIMEOUT(OBD_FAIL_MDS_RENAME4, 5);
 	OBD_FAIL_TIMEOUT(OBD_FAIL_MDS_RENAME2, 5);
 
+	/* hold with both parents locked and before either child is */
+	CFS_FAIL_TIMEOUT(OBD_FAIL_MDS_RENAME_PARENTS_DELAY,
+			 cfs_fail_val ? cfs_fail_val : 20);
+
 	/* find mold object. */
 	fid_zero(old_fid);
 	rc = mdt_lookup_version_check(info, msrcdir, &rr->rr_name, old_fid, 2);
@@ -2971,6 +2979,10 @@ relock:
 		if (S_ISDIR(lu_object_attr(&mnew->mot_obj)) &&
 		    !S_ISDIR(lu_object_attr(&mold->mot_obj)))
 			GOTO(out_put_new, rc = -EISDIR);
+
+		/* hold after the target lookup and before either child lock */
+		CFS_FAIL_TIMEOUT(OBD_FAIL_MDS_RENAME_TARGET_DELAY,
+				 cfs_fail_val ? cfs_fail_val : 20);
 
 		lh_oldp = &info->mti_lh[MDT_LH_OLD];
 		lh_rmt = &info->mti_lh[MDT_LH_RMT];
