@@ -6152,12 +6152,9 @@ cleanup_hsm_split_lock() {
 	[[ -e $wedged ]] || return 0
 
 	rm -f $wedged
-	# the restore completion and the bridging operation hold each other's
-	# split XATTR/UPDATE (or LAYOUT/XATTR) locks and nothing times them
-	# out, so MDT0 has to be brought back before the rest of the suite runs
-	stop mds1 -f
-	start mds1 $(mdsdevname 1) $MDS_MOUNT_OPTS
-	wait_recovery_complete mds1
+	# the coordinator can be part of the cycle, and then MDT0 will not
+	# stop: rename_deadlock_restart_mdts says so
+	rename_deadlock_restart_mdts
 }
 
 cleanup_hsm_lov_setxattr() {
