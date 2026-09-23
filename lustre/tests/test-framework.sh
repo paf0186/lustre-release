@@ -12737,3 +12737,47 @@ get_test_project() {
 
 	echo "$TSTUSR" "$tstid"
 }
+
+# The rename lock order tests (rename_deadlock.list) either leave the
+# cluster as they found it or say it needs a restart: rename_deadlock.sh
+# stops on this marker.
+rename_deadlock_needs_restart() {
+	echo "$TESTNAME: $*" >> $TMP/rename-deadlock-restart
+	echo "RENAME DEADLOCK: the cluster needs a restart: $*"
+}
+
+# Bring back every MDT after a lock order wedge.  Wedged service threads
+# hold each other's locks and nothing times them out, and a wedge can be on
+# any MDT.  An MDT that will not stop within 120 s (a wedged kernel thread
+# holds the unmount) means the node itself has to be restarted.
+rename_deadlock_restart_mdts() {
+	local waited=0
+	local pids=()
+	local num
+	local pid
+
+	for ((num = 1; num <= MDSCOUNT; num++)); do
+		stop mds$num -f &
+		pids+=($!)
+	done
+	for pid in ${pids[@]}; do
+		while (( waited < 120 )) && kill -0 $pid 2> /dev/null; do
+			sleep 1
+			waited=$((waited + 1))
+		done
+		if kill -0 $pid 2> /dev/null; then
+			rename_deadlock_needs_restart "an MDT did not stop"
+			return 1
+		fi
+	done
+	for ((num = 1; num <= MDSCOUNT; num++)); do
+		start mds$num $(mdsdevname $num) $MDS_MOUNT_OPTS ||
+			{ rename_deadlock_needs_restart "mds$num did not start";
+			  return 1; }
+	done
+	for ((num = 1; num <= MDSCOUNT; num++)); do
+		wait_recovery_complete mds$num
+		# the next test's first lookups must not race the reconnect
+		wait_clients_import_state ${CLIENTS:-$HOSTNAME} mds$num FULL
+	done
+}

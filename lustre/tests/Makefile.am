@@ -6,7 +6,7 @@ DIST_SUBDIRS = mpi
 DIST_SUBDIRS += lutf iabf
 
 noinst_DATA =
-noinst_DATA += disk2_7-ldiskfs.tar.bz2 disk2_7-zfs.tar.bz2
+noinst_DATA += disk2_7-ldiskfs.tar.bz2 disk2_7-zfs.tar.bz2 rename_deadlock.list
 noinst_DATA += disk2_9-zfs.tar.bz2 disk2_9-ldiskfs.tar.bz2
 noinst_DATA += disk2_10-ldiskfs.tar.bz2 disk2_12-ldiskfs.tar.bz2
 noinst_DATA += disk2_15-ldiskfs.tar.bz2 disk2_15-zfs.tar.bz2
@@ -20,7 +20,7 @@ noinst_SCRIPTS += acceptance-small.sh conf-sanity.sh conf-sanity-framework.sh
 noinst_SCRIPTS += insanity.sh oos.sh oos2.sh dne_sanity.sh sanity-compr.sh
 noinst_SCRIPTS += recovery-small.sh replay-dual.sh sanity-quota.sh
 noinst_SCRIPTS += replay-ost-single.sh replay-single.sh run-llog.sh sanityn.sh
-noinst_SCRIPTS += large-scale.sh racer.sh replay-vbr.sh
+noinst_SCRIPTS += large-scale.sh racer.sh replay-vbr.sh rename_deadlock.sh
 noinst_SCRIPTS += performance-sanity.sh sanity-benchmark.sh
 noinst_SCRIPTS += lockorder.sh socketclient socketserver runmultiop_bg_pause
 noinst_SCRIPTS += sanity-sec.sh sanity-selinux.sh recovery-scale-lib.sh
