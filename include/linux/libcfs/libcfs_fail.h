@@ -22,6 +22,7 @@
 extern unsigned long cfs_fail_loc;
 extern unsigned int cfs_fail_val;
 extern int cfs_fail_err;
+extern int cfs_fail_timeout_skip;
 
 extern wait_queue_head_t cfs_race_waitq;
 extern int cfs_race_state;

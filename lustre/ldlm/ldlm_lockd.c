@@ -3344,7 +3344,57 @@ static ssize_t ldlm_enqueue_min_show(struct kobject *kobj,
 }
 LUSTRE_RO_ATTR(ldlm_enqueue_min);
 
+static ssize_t lockdep_show(struct kobject *kobj, struct attribute *attr,
+			    char *buf)
+{
+	return scnprintf(buf, PAGE_SIZE, "%d\n", ldlm_lockdep);
+}
+
+/* 0 off, 1 report, 2 report and LBUG; writing resets the graph */
+static ssize_t lockdep_store(struct kobject *kobj, struct attribute *attr,
+			     const char *buffer, size_t count)
+{
+	unsigned int val;
+	int rc;
+
+	rc = kstrtouint(buffer, 10, &val);
+	if (rc)
+		return rc;
+	if (val > 2)
+		return -ERANGE;
+	rc = ldlm_lockdep_set(val);
+	return rc ?: count;
+}
+LUSTRE_RW_ATTR(lockdep);
+
+static ssize_t lockdep_cycles_show(struct kobject *kobj,
+				   struct attribute *attr, char *buf)
+{
+	return scnprintf(buf, PAGE_SIZE, "%d\n", ldlm_lockdep_cycles());
+}
+LUSTRE_RO_ATTR(lockdep_cycles);
+
+static ssize_t lockdep_rerequests_show(struct kobject *kobj,
+				       struct attribute *attr, char *buf)
+{
+	return scnprintf(buf, PAGE_SIZE, "%d\n", ldlm_lockdep_rerequests());
+}
+LUSTRE_RO_ATTR(lockdep_rerequests);
+
+static ssize_t lockdep_dump_store(struct kobject *kobj,
+				  struct attribute *attr,
+				  const char *buffer, size_t count)
+{
+	ldlm_lockdep_dump();
+	return count;
+}
+LUSTRE_WO_ATTR(lockdep_dump);
+
 static struct attribute *ldlm_attrs[] = {
+	&lustre_attr_lockdep.attr,
+	&lustre_attr_lockdep_cycles.attr,
+	&lustre_attr_lockdep_rerequests.attr,
+	&lustre_attr_lockdep_dump.attr,
 	&lustre_attr_dump_granted_max.attr,
 	&lustre_attr_cancel_unused_locks_before_replay.attr,
 #ifdef CONFIG_LUSTRE_FS_SERVER
@@ -3673,6 +3723,7 @@ void ldlm_exit(void)
 {
 	if (ldlm_refcount)
 		CERROR("ldlm_refcount is %d in %s\n", ldlm_refcount, __func__);
+	ldlm_lockdep_fini();
 	rcu_barrier();
 	kmem_cache_destroy(ldlm_resource_slab);
 	/*

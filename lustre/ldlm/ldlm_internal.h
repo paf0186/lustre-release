@@ -12,6 +12,14 @@
  */
 
 extern int ldlm_srv_namespace_nr;
+extern int ldlm_lockdep;
+void ldlm_lockdep_release(struct ldlm_lock *lock);
+int ldlm_lockdep_cycles(void);
+int ldlm_lockdep_rerequests(void);
+void ldlm_lockdep_reset(void);
+void ldlm_lockdep_dump(void);
+int ldlm_lockdep_set(int val);
+void ldlm_lockdep_fini(void);
 extern int ldlm_cli_namespace_nr;
 extern struct mutex ldlm_srv_namespace_lock;
 extern struct list_head ldlm_srv_namespace_list;

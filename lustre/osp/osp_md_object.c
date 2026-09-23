@@ -951,6 +951,8 @@ static int osp_md_object_lock(const struct lu_env *env,
 	struct ldlm_res_id	*res_id;
 	struct osp_device	*osp = dt2osp_dev(lu2dt_dev(dt->do_lu.lo_dev));
 	struct ptlrpc_request	*req;
+	struct ldlm_lock	*lock;
+	void			*cls;
 	int			rc = 0;
 	__u64			flags = LDLM_FL_NO_LRU;
 
@@ -964,9 +966,21 @@ static int osp_md_object_lock(const struct lu_env *env,
 		RETURN(PTR_ERR(req));
 
 	osp_set_req_replay(osp, req);
+	cls = ldlm_lockdep_acquire(osp->opd_exp->exp_obd->obd_namespace,
+				   res_id, einfo->ei_mode,
+				   policy->l_inodebits.bits |
+				   policy->l_inodebits.try_bits,
+				   policy->l_inodebits.bits != 0);
 	rc = ldlm_cli_enqueue(osp->opd_exp, &req, einfo, res_id,
 			      (const union ldlm_policy_data *)policy, &flags,
 			      NULL, 0, LVB_T_NONE, lh, 0);
+	if (rc == ELDLM_OK && cls) {
+		lock = ldlm_handle2lock(lh);
+		if (lock) {
+			ldlm_lockdep_held(lock, cls);
+			ldlm_lock_put(lock);
+		}
+	}
 
 	ptlrpc_req_put(req);
 

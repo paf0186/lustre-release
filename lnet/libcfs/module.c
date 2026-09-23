@@ -426,6 +426,13 @@ static struct lnet_debugfs_table lnet_table[] = {
 		.proc_handler	= &debugfs_doint,
 	},
 	{
+		.procname	= "fail_timeout_skip",
+		.data		= &cfs_fail_timeout_skip,
+		.maxlen		= sizeof(cfs_fail_timeout_skip),
+		.mode		= 0644,
+		.proc_handler	= &debugfs_doint,
+	},
+	{
 	}
 };
 

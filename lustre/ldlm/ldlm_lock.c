@@ -853,6 +853,8 @@ void ldlm_lock_decref_internal(struct ldlm_lock *lock, enum ldlm_mode mode)
 
 	ENTRY;
 
+	ldlm_lockdep_release(lock);
+
 	lock_res_and_lock(lock);
 
 	ns = ldlm_lock_to_ns(lock);

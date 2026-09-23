@@ -2570,6 +2570,7 @@ static int ptlrpc_server_handle_request(struct ptlrpc_service_part *svcpt,
 		thread->t_env->le_ses = &request->rq_session;
 	}
 	svc->srv_ops.so_req_handler(request);
+	ldlm_lockdep_ctx_end();
 
 	ptlrpc_rqphase_move(request, RQ_PHASE_COMPLETE);
 

@@ -12,4 +12,4 @@ ldlm_objs += ldlm_plain.o ldlm_extent.o
 ldlm_objs += ldlm_request.o ldlm_lockd.o
 ldlm_objs += ldlm_flock.o ldlm_inodebits.o
 ldlm_objs += ldlm_pool.o ldlm_reclaim.o
-ldlm_objs += ldlm_cache_policy.o
+ldlm_objs += ldlm_cache_policy.o ldlm_lockdep.o

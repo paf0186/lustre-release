@@ -1864,6 +1864,11 @@ int ldlm_cli_enqueue_fini(struct obd_export *exp, struct req_capsule *pill,
 			  __u64 *flags, void *lvb, __u32 lvb_len,
 			  const struct lustre_handle *lockh, int rc,
 			  bool request_slot);
+void *ldlm_lockdep_acquire(struct ldlm_namespace *ns,
+			   const struct ldlm_res_id *res, enum ldlm_mode mode,
+			   __u64 bits, bool blocking);
+void ldlm_lockdep_held(struct ldlm_lock *lock, void *cls);
+void ldlm_lockdep_ctx_end(void);
 int ldlm_cli_enqueue_local(const struct lu_env *env,
 			   struct ldlm_namespace *ns,
 			   const struct ldlm_res_id *res_id,
