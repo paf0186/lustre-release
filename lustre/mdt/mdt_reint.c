@@ -3166,6 +3166,10 @@ lock_bfl:
 	 * 3b. re-get the child locks if they were dropped in 3a
 	 * See LU-17427
 	 */
+	/* hold with the child locks taken and before the BFL try */
+	CFS_FAIL_TIMEOUT(OBD_FAIL_MDS_RENAME_CHILDREN_DELAY,
+			 cfs_fail_val ? cfs_fail_val : 20);
+
 	if (need_bfl && !got_bfl && mdt->mdt_enable_rename_trylock) {
 		struct lu_fid old_fid_backup = *old_fid;
 
