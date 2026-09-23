@@ -5425,6 +5425,20 @@ replay_two_renames_wedged() {
 	return 0
 }
 
+# a client evicted in recovery means its replays never ran
+replay_client_evicted() {
+	local f
+	local mdt
+
+	for f in mds1 mds2; do
+		mdt=$(facet_svc $f)
+		do_facet $f "$LCTL get_param -n mdt.$mdt.recovery_status" |
+			awk '/^completed_clients:/ { split($2, c, "/");
+				if (c[1] != c[2]) exit 1 }' || return 0
+	done
+	return 1
+}
+
 test_205a() {
 	(( MDSCOUNT >= 2 )) || skip "needs >= 2 MDTs"
 
@@ -5464,6 +5478,8 @@ test_205a() {
 	replay_two_renames_wedged $failpid &&
 		error "(8) recovery deadlocked; restart both MDTs"
 	wait $failpid || error "(9) failover failed"
+	replay_client_evicted &&
+		error "(11) the client was evicted; its replays did not run"
 	[[ -e $DIR/$tdir/p/a/$tfile ]] || error "(10) $tfile is not in p/a"
 }
 run_test 205a "two MDTs replaying inverse cross-MDT renames"
@@ -5502,6 +5518,8 @@ test_205b() {
 	replay_two_renames_wedged $failpid &&
 		error "(6) recovery deadlocked; restart both MDTs"
 	wait $failpid || error "(7) failover failed"
+	replay_client_evicted &&
+		error "(11) the client was evicted; its replays did not run"
 	[[ -e $DIR/$tdir/E/$n1 && -e $DIR/$tdir/D/$n2 ]] ||
 		error "(8) a replayed rename is missing"
 }
