@@ -1932,6 +1932,10 @@ static int mdt_swap_layouts(struct tgt_session_info *tsi)
 	if (rc < 0)
 		GOTO(put, rc);
 
+	/* hold between the two layout locks, with the higher FID taken */
+	CFS_FAIL_TIMEOUT(OBD_FAIL_MDS_SWAP_LAYOUTS_DELAY,
+			 cfs_fail_val ? cfs_fail_val : 30);
+
 	rc = mdt_object_lock(info, o2, lh2, MDS_INODELOCK_LAYOUT |
 			     MDS_INODELOCK_XATTR, LCK_EX);
 	if (rc < 0)
