@@ -1305,6 +1305,10 @@ static int mdt_reint_unlink(struct mdt_thread_info *info,
 	if (rc != 0)
 		GOTO(put_parent, rc);
 
+	/* hold with the parent locked and before the child is */
+	CFS_FAIL_TIMEOUT(OBD_FAIL_MDS_UNLINK_PARENT_DELAY,
+			 cfs_fail_val ? cfs_fail_val : 20);
+
 	if (!mdt_object_remote(mp)) {
 		rc = mdt_version_get_check_save(info, mp, 0);
 		if (rc)
@@ -2971,6 +2975,10 @@ lock_bfl:
 
 	CFS_FAIL_TIMEOUT(OBD_FAIL_MDS_RENAME4, 5);
 	CFS_FAIL_TIMEOUT(OBD_FAIL_MDS_RENAME2, 5);
+
+	/* hold with both parents locked and before either child is */
+	CFS_FAIL_TIMEOUT(OBD_FAIL_MDS_RENAME_PARENTS_DELAY,
+			 cfs_fail_val ? cfs_fail_val : 20);
 
 	/* find mold object. */
 	fid_zero(old_fid);
