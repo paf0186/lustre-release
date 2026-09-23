@@ -5530,8 +5530,10 @@ test_205a() {
 	fail mds1,mds2 &
 	failpid=$!
 
-	replay_two_renames_wedged $failpid &&
+	if replay_two_renames_wedged $failpid; then
+		rename_deadlock_needs_restart "recovery deadlocked"
 		error "(8) recovery deadlocked; restart both MDTs"
+	fi
 	wait $failpid || error "(9) failover failed"
 	replay_client_evicted &&
 		error "(11) the client was evicted; its replays did not run"
@@ -5570,8 +5572,10 @@ test_205b() {
 	fail mds1,mds2 &
 	failpid=$!
 
-	replay_two_renames_wedged $failpid &&
+	if replay_two_renames_wedged $failpid; then
+		rename_deadlock_needs_restart "recovery deadlocked"
 		error "(6) recovery deadlocked; restart both MDTs"
+	fi
 	wait $failpid || error "(7) failover failed"
 	replay_client_evicted &&
 		error "(11) the client was evicted; its replays did not run"
