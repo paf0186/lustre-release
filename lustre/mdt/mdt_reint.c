@@ -2838,6 +2838,9 @@ static bool mdt_rename_need_bfl(struct mdt_device *mdt, bool isdir,
  * 2 - srcdir child; 3 - tgtdir child.
  * Update on disk version of srcdir child.
  */
+/* passes a rename tries its locks for, the BFL held after the first */
+#define MDT_RENAME_TRY_PASSES	16
+
 static int mdt_reint_rename(struct mdt_thread_info *info,
 			    struct mdt_lock_handle *unused)
 {
@@ -2869,6 +2872,7 @@ static int mdt_reint_rename(struct mdt_thread_info *info,
 	bool preempt = false;
 	bool nowait;
 	bool got_bfl = false;
+	int passes = 0;
 	int rc;
 
 	ENTRY;
@@ -2972,14 +2976,24 @@ lock_bfl:
 		 * and a cycle through one of those re-forms on the retry.
 		 */
 		if (preempt_done || (need_bfl && remote_parent)) {
-			rc = mdt_rename_lock(info, rename_lh, false);
-			if (rc != 0) {
-				CERROR("%s: cannot lock for rename: rc = %d\n",
-				       mdt_obd_name(mdt), rc);
-				GOTO(out_put_tgtdir, rc);
+			/* a retry keeps the BFL it took on the first refusal */
+			if (!got_bfl) {
+				rc = mdt_rename_lock(info, rename_lh, false);
+				if (rc != 0) {
+					CERROR("%s: cannot lock for rename: rc = %d\n",
+					       mdt_obd_name(mdt), rc);
+					GOTO(out_put_tgtdir, rc);
+				}
+				got_bfl = true;
 			}
-			got_bfl = true;
-			nowait = false;
+			/* the retry tries too, or re-forms a cycle through a
+			 * locker the BFL does not serialise; bounded, it then
+			 * waits
+			 */
+			nowait = passes < MDT_RENAME_TRY_PASSES;
+			if (!nowait && passes == MDT_RENAME_TRY_PASSES)
+				mdt_counter_incr(req, LPROC_MDT_RENAME_TRY_SPENT,
+						 0);
 			msi = 0;
 		} else {
 			if (old_isdir)
@@ -3030,14 +3044,14 @@ lock_bfl:
 				       mtgtdir, lh_tgtdirp, &rr->rr_tgt_name,
 				       nowait);
 
-	if (rc == -EWOULDBLOCK && !preempt_done) {
+	if (rc == -EWOULDBLOCK) {
 		/* another service thread holds the second parent; retry under
 		 * the BFL rather than wait for it while holding the first
 		 */
 		mdt_object_put(info->mti_env, mtgtdir);
 		mdt_object_put(info->mti_env, msrcdir);
 		preempt_done = true;
-		nowait = false;
+		passes++;
 		mdt_counter_incr(req, LPROC_MDT_RENAME_PREEMPT,
 				 ktime_us_delta(ktime_get(), kstart));
 		goto lock_bfl;
@@ -3320,7 +3334,7 @@ out_preempt:
 
 		preempt = false;
 		preempt_done = true;
-		nowait = false;
+		passes++;
 		mdt_counter_incr(req, LPROC_MDT_RENAME_PREEMPT,
 				 ktime_us_delta(ktime_get(), kstart));
 		goto lock_bfl;

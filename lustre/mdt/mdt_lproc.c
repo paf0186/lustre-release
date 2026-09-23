@@ -1583,6 +1583,7 @@ static const char * const mdt_stats[] = {
 	[LPROC_MDT_RENAME_CROSSDIR]	= "crossdir_rename",
 	[LPROC_MDT_RENAME_TRYLOCK]	= "rename_trylocks",
 	[LPROC_MDT_RENAME_PREEMPT]	= "rename_preempts",
+	[LPROC_MDT_RENAME_TRY_SPENT]	= "rename_tries_spent",
 	[LPROC_MDT_IO_READ_BYTES]	= "read_bytes",
 	[LPROC_MDT_IO_WRITE_BYTES]	= "write_bytes",
 	[LPROC_MDT_IO_READ]		= "read",
