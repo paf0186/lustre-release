@@ -6,7 +6,7 @@ DIST_SUBDIRS = mpi
 DIST_SUBDIRS += lutf
 
 noinst_DATA =
-noinst_DATA += disk2_7-ldiskfs.tar.bz2 disk2_7-zfs.tar.bz2
+noinst_DATA += disk2_7-ldiskfs.tar.bz2 disk2_7-zfs.tar.bz2 rename_deadlock.list
 noinst_DATA += disk2_9-zfs.tar.bz2 disk2_9-ldiskfs.tar.bz2
 noinst_DATA += disk2_10-ldiskfs.tar.bz2 disk2_12-ldiskfs.tar.bz2
 noinst_DATA += ldiskfs_mdt1_2_11.tar.bz2 ldiskfs_mdt2_2_11.tar.bz2
@@ -19,7 +19,7 @@ noinst_SCRIPTS += rundbench acceptance-small.sh compile.sh conf-sanity.sh
 noinst_SCRIPTS += insanity.sh oos.sh oos2.sh dne_sanity.sh
 noinst_SCRIPTS += recovery-small.sh replay-dual.sh sanity-quota.sh
 noinst_SCRIPTS += replay-ost-single.sh replay-single.sh run-llog.sh sanityn.sh
-noinst_SCRIPTS += large-scale.sh racer.sh replay-vbr.sh
+noinst_SCRIPTS += large-scale.sh racer.sh replay-vbr.sh rename_deadlock.sh
 noinst_SCRIPTS += performance-sanity.sh mdsrate-create-small.sh
 noinst_SCRIPTS += mdsrate-create-large.sh mdsrate-lookup-1dir.sh
 noinst_SCRIPTS += mdsrate-lookup-10dirs.sh sanity-benchmark.sh
