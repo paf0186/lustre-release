@@ -1643,7 +1643,8 @@ put_parent:
  *			-ev negative errno upon error
  */
 static int mdt_rename_lock(struct mdt_thread_info *info,
-			   struct mdt_lock_handle *lh, bool trylock)
+			   struct mdt_lock_handle *lh, enum ldlm_mode mode,
+			   bool trylock)
 {
 	enum mds_ibits_locks ibits = MDS_INODELOCK_UPDATE;
 	enum mds_ibits_locks trybits = MDS_INODELOCK_NONE;
@@ -1657,7 +1658,7 @@ static int mdt_rename_lock(struct mdt_thread_info *info,
 	if (IS_ERR(obj))
 		RETURN(PTR_ERR(obj));
 
-	mdt_lock_reg_init(lh, LCK_EX);
+	mdt_lock_reg_init(lh, mode);
 	ibits = trylock ? MDS_INODELOCK_NONE : MDS_INODELOCK_UPDATE;
 	trybits = trylock ? MDS_INODELOCK_UPDATE : MDS_INODELOCK_NONE;
 	rc = mdt_object_lock_internal(info, obj, &LUSTRE_BFL_FID, lh,
@@ -1671,7 +1672,7 @@ static int mdt_rename_lock(struct mdt_thread_info *info,
 static inline int mdt_rename_lock_try(struct mdt_thread_info *info,
 				       struct mdt_lock_handle *lh)
 {
-	return mdt_rename_lock(info, lh, true);
+	return mdt_rename_lock(info, lh, LCK_EX, true);
 }
 
 static void mdt_rename_unlock(struct mdt_thread_info *info,
@@ -2363,7 +2364,7 @@ int mdt_reint_migrate(struct mdt_thread_info *info,
 	 * req is NULL if this is called by directory auto-split.
 	 */
 	if (req && !req_is_replay(req)) {
-		rc = mdt_rename_lock(info, rename_lh, false);
+		rc = mdt_rename_lock(info, rename_lh, LCK_EX, false);
 		if (rc != 0) {
 			CERROR("%s: can't lock FS for rename: rc = %d\n",
 			       mdt_obd_name(info->mti_mdt), rc);
@@ -2816,6 +2817,7 @@ static int mdt_reint_rename(struct mdt_thread_info *info,
 	bool need_bfl = false;
 	bool preempt_done = false;
 	bool got_bfl = false;
+	enum ldlm_mode tree_mode = LCK_MODE_MIN;
 	int rc;
 
 	ENTRY;
@@ -2894,23 +2896,25 @@ lock_bfl:
 		if (!mdt->mdt_enable_remote_rename && remote)
 			GOTO(out_put_tgtdir, rc = -EXDEV);
 
-		need_bfl |= remote ||
-			    (S_ISDIR(ma->ma_attr.la_mode) &&
-			     (msrcdir != mtgtdir ||
-			      !mdt->mdt_enable_parallel_rename_dir)) ||
-			    (!S_ISDIR(ma->ma_attr.la_mode) &&
-			     (!mdt->mdt_enable_parallel_rename_file ||
-			      (msrcdir != mtgtdir &&
-			       !mdt->mdt_enable_parallel_rename_crossdir)));
-		if (need_bfl && preempt_done) {
-			rc = mdt_rename_lock(info, rename_lh, false);
+		/* the tree lock: shared for a file moved between two
+		 * directories, exclusive for a directory, none within one
+		 * directory; taken before the lock order is decided
+		 */
+		if (msrcdir != mtgtdir) {
+			if (tree_mode == LCK_MODE_MIN)
+				tree_mode = S_ISDIR(ma->ma_attr.la_mode) ?
+					    LCK_EX : LCK_PR;
+			rc = mdt_rename_lock(info, rename_lh, tree_mode, false);
 			if (rc != 0) {
 				CERROR("%s: cannot lock for rename: rc = %d\n",
 				       mdt_obd_name(mdt), rc);
 				GOTO(out_put_tgtdir, rc);
 			}
+			need_bfl = true;
 			got_bfl = true;
-			msi = 0;
+			/* shared holders still run in parallel */
+			msi = tree_mode == LCK_PR ?
+			      LPROC_MDT_RENAME_PAR_FILE : 0;
 		} else {
 			if (S_ISDIR(ma->ma_attr.la_mode))
 				msi = LPROC_MDT_RENAME_PAR_DIR;
@@ -2998,10 +3002,21 @@ lock_bfl:
 	if (mdt_object_remote(mold) && !mdt->mdt_enable_remote_rename)
 		GOTO(out_put_old, rc = -EXDEV);
 
-	/* we used msrcdir as a hint to take BFL, but it may be wrong */
-	need_bfl |= !req_is_replay(req) &&
-		    !S_ISDIR(ma->ma_attr.la_mode) &&
-		    mdt_object_remote(mold);
+	/* a directory where the client said file: never upgrade in place,
+	 * since an upgrade would wait behind shared holders that may be
+	 * waiting for this rename
+	 */
+	if (tree_mode == LCK_PR && S_ISDIR(lu_object_attr(&mold->mot_obj))) {
+		mdt_object_put(info->mti_env, mold);
+		mdt_object_unlock(info, mtgtdir, lh_tgtdirp, 1);
+		mdt_object_unlock(info, msrcdir, lh_srcdirp, 1);
+		mdt_rename_unlock(info, rename_lh);
+		got_bfl = false;
+		mdt_object_put(info->mti_env, mtgtdir);
+		mdt_object_put(info->mti_env, msrcdir);
+		tree_mode = LCK_EX;
+		goto lock_bfl;
+	}
 
 	/* Check if @mtgtdir is subdir of @mold, before locking child
 	 * to avoid reverse locking.
