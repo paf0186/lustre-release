@@ -27,6 +27,9 @@ EXPORT_SYMBOL(cfs_fail_val);
 int cfs_fail_err;
 EXPORT_SYMBOL(cfs_fail_err);
 
+/* a timeout fail point fires but does not sleep */
+int cfs_fail_timeout_skip;
+
 DECLARE_WAIT_QUEUE_HEAD(cfs_race_waitq);
 EXPORT_SYMBOL(cfs_race_waitq);
 
@@ -118,7 +121,7 @@ int __cfs_fail_timeout_set(const char *file, const char *func, const int line,
 	int ret;
 
 	ret = __cfs_fail_check_set(id, value, set);
-	if (ret && likely(ms > 0)) {
+	if (ret && likely(ms > 0) && !cfs_fail_timeout_skip) {
 		CDEBUG_LIMIT_LOC(file, func, line, D_ERROR,
 				 "cfs_fail_timeout id %x sleeping for %dms\n",
 				 id, ms);
