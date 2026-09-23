@@ -5668,6 +5668,40 @@ test_205d() {
 }
 run_test 205d "a lookup pinned across a remote MDT's recovery"
 
+test_205e() {
+	(( MDSCOUNT >= 2 )) || skip "needs >= 2 MDTs"
+
+	local mdts=$(mdts_nodes)
+	local evicted=false
+
+	# S and T in P on MDT0, e in T; U on MDT1
+	mkdir_on_mdt0 $DIR/$tdir || error "(0) mkdir failed"
+	$LFS mkdir -i 0 $DIR/$tdir/S || error "(1) mkdir S failed"
+	$LFS mkdir -i 0 $DIR/$tdir/T || error "(2) mkdir T failed"
+	$LFS mkdir -i 1 $DIR/$tdir.U || error "(3) mkdir U failed"
+	stack_trap "rm -rf $DIR/$tdir.U"
+	touch $DIR/$tdir/S/x $DIR/$tdir/T/e || error "(4) touch failed"
+	# only the two renames may be replayed
+	do_nodes $mdts "$LCTL set_param -n osd*.*MDT*.force_sync=1"
+
+	replay_barrier mds1
+	replay_barrier mds2
+	# the first empties T and is served on MDT1; the second replaces T
+	# with S and is served on MDT0, where it needs T empty
+	mrename $DIR/$tdir/T/e $DIR/$tdir.U/e || error "(5) first rename failed"
+	mrename $DIR/$tdir/S $DIR/$tdir/T || error "(6) second rename failed"
+	fail mds1,mds2 || error "(7) failover failed"
+	replay_client_evicted && evicted=true
+
+	# a stale negative dentry on the client would hide a surviving name
+	cancel_lru_locks mdc
+	[[ "$(ls $DIR/$tdir)" == "T" && "$(ls $DIR/$tdir/T)" == "x" &&
+	   "$(ls $DIR/$tdir.U)" == "e" ]] ||
+		error "(8) a completed rename was lost (evicted: $evicted): $(ls -R $DIR/$tdir $DIR/$tdir.U)"
+	! $evicted || error "(9) the client was evicted in recovery"
+}
+run_test 205e "a replayed rename must not be refused for a directory not yet emptied"
+
 complete_test $SECONDS
 check_and_cleanup_lustre
 exit_status
