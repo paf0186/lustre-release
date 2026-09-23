@@ -1,0 +1,59 @@
+# The rename lock order tests, run by rename_deadlock.sh.
+#
+# entry:    the catalogue's entry number
+# outcomes: what each numbered error of the test means
+#           W  wedge: the operations deadlocked
+#           E  eviction: a client was evicted to break the cycle
+#           L  loss: an operation that returned success is undone
+#           N  not reached: the schedule did not form, nothing shown
+#           X  the setup cannot be built on this release
+#           any other error is a setup failure (F)
+# expected, per release (2.15 2.16 2.17 master series):
+#           W E L  the entry is present and shows this way
+#           -      absent: a PASS or a schedule that does not form
+#           C      PASS        S  skipped      X  cannot be built
+#           ?      not known yet
+#
+# suite		test	entry	outcomes		2.15 2.16 2.17 master series
+sanityn		81j	104	8=W,11=N		-    -    W    W      C
+sanityn		81k	103	9=W,7=N			-    -    W    W      C
+sanityn		81l	102	7=W,6=N,8=N		-    W    W    W      C
+sanityn		81m	105	9=W,11=N		-    -    W    W      C
+sanityn		81n	106	8=W			-    -    W    W      C
+sanityn		81o	108	10=W,12=N		-    -    W    W      C
+sanityn		81p	109	10=W			-    -    W    W      C
+sanityn		81q	series	-			C    C    C    C      C
+sanityn		81r	102	7=W			C    C    W    W      C
+sanityn		81s	series	5=N			S    S    S    S      C
+sanityn		81t	series	-			C    C    C    C      C
+sanityn		81u	215	2=E			S    E    E    E      C
+sanityn		81v	107	6=W			-    -    W    W      W
+sanityn		81am	107	6=W			W    W    W    W      W
+sanityn		81aj	107	11=W,9=N,10=N		?    ?    W    W      W
+sanityn		81w	210	6=W			W    W    W    W      W
+sanityn		81x	213	6=W,2=X			X    -    W    W      W
+sanityn		81z	212	7=W			-    -    W    W      W
+sanityn		81aa	212	6=W,9=N			-    -    W    W      C
+sanityn		81y	216	7=W,8=E,2=X		X    W    W    W      C
+sanityn		81ai	217	9=W,10=E,6=N,7=N,8=N	-    -    E    E      E
+sanityn		81ae	309	10=E			S    E    E    E      C
+sanityn		81ah	310	10=E			S    E    E    E      C
+sanityn		81ab	310	10=E			S    E    E    E      C
+sanityn		81ac	313	10=E			S    E    E    E      C
+sanityn		81ad	215	10=E			S    E    E    E      C
+sanityn		81af	216	10=W,11=E,7=N,8=N,9=N	S    S    S    S      E
+sanityn		81ag	216	8=W,6=N,7=N		S    S    S    S      W
+sanityn		81ak	212	7=W,6=N			S    S    S    S      W
+sanityn		81al	501	9=L,10=L,6=N		-    -    L    L      C
+sanityn		81an	110	4=W			W    -    -    -      -
+sanity-hsm	608a	312	5=W			-    -    -    W      W
+sanity-hsm	608b	311	4=W			-    -    -    W      W
+sanity-hsm	608c	301	5=W			-    -    -    W      W
+sanity-hsm	608e	214	6=W			-    -    -    W      W
+replay-single	205c	502	8=L			L    L    L    L      L
+replay-single	205e	502	8=L,9=E			?    ?    ?    L      L
+replay-single	205d	406	9=E,10=L		-    -    -    -      -
+# these can leave the cluster needing a restart; they run last
+sanity-hsm	608d	302	7=W			W    W    W    W      W
+replay-single	205a	403	8=W,11=E		?    -    W    W      W
+replay-single	205b	404	6=W,11=E		W    W    W    -      C

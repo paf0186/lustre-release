@@ -6491,14 +6491,7 @@ cleanup_rename_deadlock() {
 	[[ -e $wedged ]] || return 0
 
 	rm -f $wedged
-	# the wedged service threads hold each other's locks and nothing times
-	# them out, so the MDT has to be brought back before the rest of the
-	# suite can run
-	stop mds1 -f
-	start mds1 $(mdsdevname 1) $MDS_MOUNT_OPTS
-	wait_recovery_complete mds1
-	# the next test's first lookups must not race the reconnect
-	wait_clients_import_state ${CLIENTS:-$HOSTNAME} mds1 FULL
+	rename_deadlock_restart_mdts
 }
 
 test_81j() {
