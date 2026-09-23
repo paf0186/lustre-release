@@ -6850,6 +6850,607 @@ log "cleanup: ======================================================"
 [ "$(mount | grep $MOUNT2)" ] && wait_update $HOSTNAME "fuser -m $MOUNT2" "" ||
 	true
 
+cleanup_rename_deadlock() {
+	local wedged=$1
+	local mdts=$(comma_list $(mdts_nodes))
+
+	do_nodes $mdts "$LCTL set_param fail_loc=0" > /dev/null 2>&1
+	[[ -e $wedged ]] || return 0
+
+	rm -f $wedged
+	# the wedged service threads hold each other's locks and nothing times
+	# them out, so the MDT has to be brought back before the rest of the
+	# suite can run
+	stop mds1 -f
+	start mds1 $(mdsdevname 1) $MDS_MOUNT_OPTS
+	wait_recovery_complete mds1
+}
+
+cleanup_81al() {
+	local damaged=$1
+
+	[[ -e $damaged ]] || return 0
+	rm -f $damaged
+	do_facet mds1 "$LCTL lfsck_start -M $(facet_svc mds1) -t namespace \
+		-A -r -C on" > /dev/null
+	wait_update_facet mds1 "$LCTL get_param -n \
+		mdd.$(facet_svc mds1).lfsck_namespace |
+		awk '/^status/ { print \\\$2 }'" "completed" 300 ||
+		error "namespace LFSCK did not complete"
+	cancel_lru_locks mdc
+	rm -rf $DIR1/$tdir
+}
+
+test_81u() {
+
+	local mdts=$(comma_list $(mdts_nodes))
+	local evictions
+	local waited
+	local fl
+	local order
+	local start
+	local pidl
+	local pidm
+	local src
+	local dst
+	local i
+
+	stack_trap "do_nodes $mdts \"$LCTL set_param fail_loc=0 fail_val=0\" \
+		> /dev/null"
+
+	mkdir_on_mdt0 $DIR1/$tdir || error "(0) mkdir failed"
+	createmany -o $DIR1/$tdir/e 120 || error "(1) createmany failed"
+
+	# statahead prefetches ahead of the ls cursor, so the first entry is
+	# read by ls itself and the batch starts at the next one.  The target
+	# has to be the entry right after it, or the batch drains before its
+	# sub-request reaches the bucket the rename holds.
+	order=($(ls -U $DIR1/$tdir))
+	src=${order[1]}
+	dst=${order[2]}
+
+	# the client caches everything it just created, and a warm ls needs
+	# no statahead at all
+	cancel_lru_locks mdc
+
+	evictions=$(do_facet mds1 "dmesg | grep -c 'evicting client'")
+
+	#define OBD_FAIL_MDS_BATCH_DELAY 0x2405
+	# hold the batch after its first sub-request, whose child lock is
+	# already exported to the client running ls
+	do_nodes $mdts "$LCTL set_param fail_val=1 fail_loc=0x80002405" \
+		> /dev/null
+
+	ls -l $DIR1/$tdir > /dev/null 2>&1 &
+	pidl=$!
+
+	waited=0
+	while (( waited < 40 )); do
+		fl=$(do_facet mds1 "$LCTL get_param -n fail_loc")
+		(( fl == 0xc0002405 )) && break
+		sleep 1
+		waited=$((waited + 1))
+	done
+	(( waited < 40 )) || skip_env "the batch did not reach the fail point"
+
+	start=$SECONDS
+	mrename $DIR2/$tdir/$src $DIR2/$tdir/$dst > /dev/null 2>&1 &
+	pidm=$!
+
+	waited=0
+	while (( waited < 200 )) && { kill -0 $pidl 2> /dev/null ||
+				      kill -0 $pidm 2> /dev/null; }; do
+		sleep 2
+		waited=$((waited + 2))
+	done
+	do_nodes $mdts "$LCTL set_param fail_loc=0 fail_val=0" > /dev/null
+
+	# the batch cannot reply until its later sub-request gets the bucket
+	# the rename holds, and the rename cannot proceed until the client
+	# drops the lock the batch exported, so only the callback timer ends
+	# it -- by evicting the client
+	(( $(do_facet mds1 "dmesg | grep -c 'evicting client'") == \
+	   evictions )) ||
+		error "(2) the ls client was evicted to break a rename"
+
+	(( SECONDS - start < 30 )) ||
+		error "(3) the rename stalled $((SECONDS - start))s on a batch"
+}
+run_test 81u "a rename must not stall behind a batched statahead"
+
+test_81v() {
+	(( MDSCOUNT >= 2 )) || skip_env "needs >= 2 MDTs"
+
+	local wedged=$TMP/rename_stripe_deadlock.$$
+	local mdts=$(comma_list $(mdts_nodes))
+	local waited
+	local order
+	local idx0
+	local idx1
+	local pidr
+	local pidw
+	local pids
+	local cn
+	local fn
+	local i
+
+	mkdir -p $MOUNT3 && mount_client $MOUNT3 ||
+		skip_env "cannot mount a third client"
+	stack_trap "umount_client $MOUNT3"
+	stack_trap "cleanup_rename_deadlock $wedged"
+
+	# stripes are allocated consecutively from the offset and do not wrap,
+	# so the pair (last, 0) has to be spelled out.  Stripe 0 then has the
+	# higher FID sequence and stripe 1 the lower.
+	test_mkdir $DIR1/$tdir || error "(0) mkdir failed"
+	$LFS setdirstripe -i $((MDSCOUNT - 1)),0 $DIR1/$tdir/M ||
+		error "(1) setdirstripe failed"
+	order=($($LFS getdirstripe $DIR1/$tdir/M | awk '/0x/{print $1}'))
+	idx0=${order[0]}
+	idx1=${order[1]}
+	(( idx1 < idx0 )) || error "(2) stripe1 is not on the lower MDT"
+
+	# an entry lives in the stripe its name hashes to, and a new object is
+	# created on that stripe's MDT, so a throwaway file identifies it
+	for ((i = 0; i < 400; i++)); do
+		touch $DIR1/$tdir/M/p$i || error "(3) touch failed"
+		if [[ $($LFS getstripe -m $DIR1/$tdir/M/p$i) == "$idx1" ]] &&
+		   [[ -z "$cn" ]]; then
+			cn=p$i
+		elif [[ $($LFS getstripe -m $DIR1/$tdir/M/p$i) == "$idx0" ]] &&
+		     [[ -z "$fn" ]]; then
+			fn=p$i
+		fi
+		[[ -n "$cn" && -n "$fn" ]] && break
+		[[ $DIR1/$tdir/M/p$i != $DIR1/$tdir/M/$cn ]] &&
+			[[ $DIR1/$tdir/M/p$i != $DIR1/$tdir/M/$fn ]] &&
+			rm -f $DIR1/$tdir/M/p$i
+	done
+	[[ -n "$cn" && -n "$fn" ]] ||
+		skip_env "no names hash to both stripes"
+	rm -f $DIR1/$tdir/M/$cn
+
+	# C is born on stripe 1's MDT, so it sorts below stripe 0
+	$LFS mkdir -i $idx1 $DIR1/$tdir/C0 || error "(4) mkdir C0 failed"
+	mv $DIR1/$tdir/C0 $DIR1/$tdir/M/$cn || error "(5) mv C failed"
+	ls -d $DIR2/$tdir/M $DIR3/$tdir/M > /dev/null 2>&1
+
+	touch $wedged
+	#define OBD_FAIL_MDS_RENAME 0x153
+	do_nodes $mdts "$LCTL set_param fail_loc=0x80000153" > /dev/null
+
+	# the rename locks C first by FID and then wants stripe 0; the lookup
+	# holds stripe 1 and wants C; the rmdir holds stripe 0 and wants
+	# stripe 1.  Three locking disciplines, one cycle.
+	mrename $DIR1/$tdir/M/$fn $DIR1/$tdir/M/$cn/$fn > /dev/null 2>&1 &
+	pidr=$!
+	sleep 1
+	stat $DIR2/$tdir/M/$cn > /dev/null 2>&1 &
+	pidw=$!
+	sleep 1
+	rmdir $DIR3/$tdir/M > /dev/null 2>&1 &
+	pids=$!
+
+	waited=0
+	while (( waited < 90 )) && { kill -0 $pidr 2> /dev/null ||
+				     kill -0 $pidw 2> /dev/null ||
+				     kill -0 $pids 2> /dev/null; }; do
+		sleep 1
+		waited=$((waited + 1))
+	done
+	if kill -0 $pidr 2> /dev/null || kill -0 $pidw 2> /dev/null ||
+	   kill -0 $pids 2> /dev/null; then
+		error "(6) a rename, a lookup and an rmdir deadlocked"
+	fi
+
+	rm -f $wedged
+	do_nodes $mdts "$LCTL set_param fail_loc=0" > /dev/null
+}
+run_test 81v "a rename must not cross the stripe locker and a lookup"
+
+test_81am() {
+	(( MDSCOUNT >= 2 )) || skip_env "needs >= 2 MDTs"
+
+	local wedged=$TMP/rename_stripe_deadlock.$$
+	local mdts=$(comma_list $(mdts_nodes))
+	local waited
+	local order
+	local idx0
+	local idx1
+	local pidr
+	local pidw
+	local pids
+	local cn
+	local fn
+	local i
+
+	mkdir -p $MOUNT3 && mount_client $MOUNT3 ||
+		skip_env "cannot mount a third client"
+	stack_trap "umount_client $MOUNT3"
+	stack_trap "cleanup_rename_deadlock $wedged"
+
+	# stripes are allocated consecutively from the offset and do not wrap,
+	# so the pair (last, 0) has to be spelled out.  Stripe 0 then has the
+	# higher FID sequence and stripe 1 the lower.
+	test_mkdir $DIR1/$tdir || error "(0) mkdir failed"
+	$LFS setdirstripe -i $((MDSCOUNT - 1)),0 $DIR1/$tdir/M ||
+		error "(1) setdirstripe failed"
+	order=($($LFS getdirstripe $DIR1/$tdir/M | awk '/0x/{print $1}'))
+	idx0=${order[0]}
+	idx1=${order[1]}
+	(( idx1 < idx0 )) || error "(2) stripe1 is not on the lower MDT"
+
+	# an entry lives in the stripe its name hashes to, and a new object is
+	# created on that stripe's MDT, so a throwaway file identifies it
+	for ((i = 0; i < 400; i++)); do
+		touch $DIR1/$tdir/M/p$i || error "(3) touch failed"
+		if [[ $($LFS getstripe -m $DIR1/$tdir/M/p$i) == "$idx1" ]] &&
+		   [[ -z "$cn" ]]; then
+			cn=p$i
+		elif [[ $($LFS getstripe -m $DIR1/$tdir/M/p$i) == "$idx0" ]] &&
+		     [[ -z "$fn" ]]; then
+			fn=p$i
+		fi
+		[[ -n "$cn" && -n "$fn" ]] && break
+		[[ $DIR1/$tdir/M/p$i != $DIR1/$tdir/M/$cn ]] &&
+			[[ $DIR1/$tdir/M/p$i != $DIR1/$tdir/M/$fn ]] &&
+			rm -f $DIR1/$tdir/M/p$i
+	done
+	[[ -n "$cn" && -n "$fn" ]] ||
+		skip_env "no names hash to both stripes"
+	rm -f $DIR1/$tdir/M/$cn
+
+	# C is born on stripe 1's MDT, so it sorts below stripe 0
+	$LFS mkdir -i $idx1 $DIR1/$tdir/C0 || error "(4) mkdir C0 failed"
+	mv $DIR1/$tdir/C0 $DIR1/$tdir/M/$cn || error "(5) mv C failed"
+	touch $DIR1/$tdir/M/$cn/x || error "(5a) touch x failed"
+	ls -d $DIR2/$tdir/M $DIR3/$tdir/M > /dev/null 2>&1
+
+	touch $wedged
+	#define OBD_FAIL_MDS_RENAME 0x153
+	do_nodes $mdts "$LCTL set_param fail_loc=0x80000153" > /dev/null
+
+	# out of C into stripe 0: the rename locks its source C first, as
+	# every release does, and then wants stripe 0
+	mrename $DIR1/$tdir/M/$cn/x $DIR1/$tdir/M/$fn > /dev/null 2>&1 &
+	pidr=$!
+	sleep 1
+	stat $DIR2/$tdir/M/$cn > /dev/null 2>&1 &
+	pidw=$!
+	sleep 1
+	rmdir $DIR3/$tdir/M > /dev/null 2>&1 &
+	pids=$!
+
+	waited=0
+	while (( waited < 90 )) && { kill -0 $pidr 2> /dev/null ||
+				     kill -0 $pidw 2> /dev/null ||
+				     kill -0 $pids 2> /dev/null; }; do
+		sleep 1
+		waited=$((waited + 1))
+	done
+	if kill -0 $pidr 2> /dev/null || kill -0 $pidw 2> /dev/null ||
+	   kill -0 $pids 2> /dev/null; then
+		error "(6) a rename, a lookup and an rmdir deadlocked"
+	fi
+
+	rm -f $wedged
+	do_nodes $mdts "$LCTL set_param fail_loc=0" > /dev/null
+}
+run_test 81am "a rename out of the child must not cross the stripe locker"
+
+test_81x() {
+	(( MDSCOUNT >= 2 )) || skip_env "needs >= 2 MDTs"
+
+	local wedged=$TMP/rename_shrink_deadlock.$$
+	local mdts=$(comma_list $(mdts_nodes))
+	local waited
+	local sseq
+	local pseq
+	local pidu
+	local pidr
+
+	stack_trap "cleanup_rename_deadlock $wedged"
+	stack_trap "do_nodes $mdts \
+		\"$LCTL set_param -n mdt.*.enable_dir_restripe=0\" > /dev/null"
+	do_nodes $mdts "$LCTL set_param mdt.*.enable_dir_restripe=1 \
+		mdt.*.enable_dir_migration=1" > /dev/null
+
+	mkdir_on_mdt0 $DIR1/$tdir || error "(0) mkdir failed"
+	$LFS mkdir -i 1 $DIR1/$tdir/P || error "(1) mkdir P failed"
+	# both stripes on MDT0, so whichever one the name hashes to still
+	# sorts below P and the rename locks it before P
+	$LFS setdirstripe -i 0,0 $DIR1/$tdir/P/C ||
+		error "(2) setdirstripe failed"
+	touch $DIR1/$tdir/P/x || error "(3) touch failed"
+
+	sseq=$($LFS getdirstripe $DIR1/$tdir/P/C | awk '/0x/{print $2; exit}' |
+	       tr -d '[]' | cut -d: -f1)
+	pseq=$($LFS path2fid $DIR1/$tdir/P | tr -d '[]' | cut -d: -f1)
+	(( sseq < pseq )) || error "(4) stripe0 seq $sseq >= P seq $pseq"
+
+	# land the migration's init and fail its finalize: the layout update
+	# only locks the parent when it has a layout change left to finish
+	#define OBD_FAIL_MDS_SETXATTR 0x133
+	do_nodes $mdts "$LCTL set_param fail_loc=0x80000133" > /dev/null
+	$LFS migrate -m 0 -c 1 $DIR1/$tdir/P/C > /dev/null 2>&1
+	do_nodes $mdts "$LCTL set_param fail_loc=0" > /dev/null
+	$LFS getdirstripe $DIR1/$tdir/P/C | grep -q migrating ||
+		error "(5) C is not layout-changing"
+
+	stat $DIR1/$tdir/P $DIR1/$tdir/P/x > /dev/null 2>&1
+	stat $DIR2/$tdir/P $DIR2/$tdir/P/x > /dev/null 2>&1
+	ls -d $DIR2/$tdir/P/C > /dev/null 2>&1
+
+	touch $wedged
+	#define OBD_FAIL_MDS_DIR_LAYOUT_DELAY 0x2406
+	do_nodes $mdts "$LCTL set_param fail_loc=0x80002406" > /dev/null
+	$LFS migrate -m 0 -c 1 $DIR1/$tdir/P/C > /dev/null 2>&1 &
+	pidu=$!
+	sleep 2
+
+	# a second mount: lfs migrate holds the parent's i_rwsem across its
+	# ioctl, so a rename on the same mount never reaches the MDT
+	mrename $DIR2/$tdir/P/x $DIR2/$tdir/P/C/y > /dev/null 2>&1 &
+	pidr=$!
+
+	waited=0
+	while (( waited < 90 )) && { kill -0 $pidu 2> /dev/null ||
+				     kill -0 $pidr 2> /dev/null; }; do
+		sleep 1
+		waited=$((waited + 1))
+	done
+	if kill -0 $pidu 2> /dev/null || kill -0 $pidr 2> /dev/null; then
+		error "(6) a directory layout shrink and a rename deadlocked"
+	fi
+
+	rm -f $wedged
+	do_nodes $mdts "$LCTL set_param fail_loc=0" > /dev/null
+}
+run_test 81x "a rename must not cross a directory layout shrink"
+
+test_81z() {
+
+	local wedged=$TMP/rename_rmdir_bucket.$$
+	local mdts=$(comma_list $(mdts_nodes))
+	# mlh_pdo_hash is full_name_hash() with a zero salt, so a colliding
+	# pair found once holds on every build.  If it ever stops colliding
+	# the rename below takes a different bucket and the test passes
+	# without exercising anything, which is visible because this test is
+	# expected to fail.
+	local nd=2vbcbaaa
+	local nf=7pbtbaaa
+	local waited
+	local fd
+	local fa
+	local pidr
+	local pidu
+
+	stack_trap "cleanup_rename_deadlock $wedged"
+
+	mkdir_on_mdt0 $DIR1/$tdir || error "(0) mkdir failed"
+	# D before A, then moved under it, so D sorts below its own parent
+	$LFS mkdir -i 0 $DIR1/$tdir/D0 || error "(1) mkdir D0 failed"
+	$LFS mkdir -i 0 $DIR1/$tdir/A || error "(2) mkdir A failed"
+	mv $DIR1/$tdir/D0 $DIR1/$tdir/A/$nd || error "(3) mv D failed"
+	touch $DIR1/$tdir/A/$nf || error "(4) touch failed"
+	# the rmdir must fail only after it has taken its locks
+	mkdir $DIR1/$tdir/A/$nd/keep || error "(5) mkdir keep failed"
+
+	fd=$($LFS path2fid $DIR1/$tdir/A/$nd | tr -d '[]' | cut -d: -f2)
+	fa=$($LFS path2fid $DIR1/$tdir/A | tr -d '[]' | cut -d: -f2)
+	(( fd < fa )) || error "(6) fid(D) $fd >= fid(A) $fa"
+
+	ls -d $DIR2/$tdir/A/$nd > /dev/null 2>&1
+
+	touch $wedged
+	#define OBD_FAIL_MDS_RENAME_PARENT_DELAY 0x2409
+	do_nodes $mdts "$LCTL set_param fail_val=25 fail_loc=0x80002409" \
+		> /dev/null
+
+	# the rename orders D before A, so it holds D and wants A's bucket
+	mrename $DIR1/$tdir/A/$nf $DIR1/$tdir/A/$nd/new > /dev/null 2>&1 &
+	pidr=$!
+	sleep 2
+
+	# the rmdir holds A's bucket for $nd, the same bucket, and wants D
+	rmdir $DIR2/$tdir/A/$nd > /dev/null 2>&1 &
+	pidu=$!
+
+	waited=0
+	while (( waited < 70 )) && { kill -0 $pidr 2> /dev/null ||
+				     kill -0 $pidu 2> /dev/null; }; do
+		sleep 1
+		waited=$((waited + 1))
+	done
+	if kill -0 $pidr 2> /dev/null || kill -0 $pidu 2> /dev/null; then
+		error "(7) a rename and an rmdir deadlocked under one bucket"
+	fi
+
+	rm -f $wedged
+	do_nodes $mdts "$LCTL set_param fail_loc=0 fail_val=0" > /dev/null
+}
+run_test 81z "a rename and an rmdir must not cross under one bucket"
+
+test_81aa() {
+
+	local wedged=$TMP/rename_stat_bucket.$$
+	local mdts=$(comma_list $(mdts_nodes))
+	# a full_name_hash collision, as in 81z
+	local nd=2vbcbaaa
+	local nf=7pbtbaaa
+	local preempts
+	local waited
+	local fd
+	local fa
+	local pidr
+	local pids
+
+	stack_trap "cleanup_rename_deadlock $wedged"
+
+	mkdir_on_mdt0 $DIR1/$tdir || error "(0) mkdir failed"
+	$LFS mkdir -i 0 $DIR1/$tdir/D0 || error "(1) mkdir D0 failed"
+	$LFS mkdir -i 0 $DIR1/$tdir/A || error "(2) mkdir A failed"
+	mv $DIR1/$tdir/D0 $DIR1/$tdir/A/$nd || error "(3) mv D failed"
+	touch $DIR1/$tdir/A/$nf || error "(4) touch failed"
+
+	fd=$($LFS path2fid $DIR1/$tdir/A/$nd | tr -d '[]' | cut -d: -f2)
+	fa=$($LFS path2fid $DIR1/$tdir/A | tr -d '[]' | cut -d: -f2)
+	(( fd < fa )) || error "(5) fid(D) $fd >= fid(A) $fa"
+
+	# the stat's name must be cold, or the lookup is answered from cache
+	# and never takes the bucket on the server
+	ls -d $DIR2/$tdir/A > /dev/null 2>&1
+	cancel_lru_locks mdc
+
+	touch $wedged
+	do_nodes $mdts "$LCTL set_param mdt.*.md_stats=clear" > /dev/null
+	#define OBD_FAIL_MDS_RENAME_PARENT_DELAY 0x2409
+	do_nodes $mdts "$LCTL set_param fail_val=25 fail_loc=0x80002409" \
+		> /dev/null
+
+	# the rename orders D before A, so it holds D and wants A's bucket
+	mrename $DIR1/$tdir/A/$nf $DIR1/$tdir/A/$nd/new > /dev/null 2>&1 &
+	pidr=$!
+	sleep 2
+
+	# a plain stat, not ls -l: a batched statahead sub-request only tries
+	# the child, so it would back off rather than hold the bucket
+	stat $DIR2/$tdir/A/$nd > /dev/null 2>&1 &
+	pids=$!
+
+	waited=0
+	while (( waited < 70 )) && { kill -0 $pidr 2> /dev/null ||
+				     kill -0 $pids 2> /dev/null; }; do
+		sleep 1
+		waited=$((waited + 1))
+	done
+	if kill -0 $pidr 2> /dev/null || kill -0 $pids 2> /dev/null; then
+		error "(6) a rename and a stat deadlocked under one bucket"
+	fi
+	wait $pidr || error "(7) rename failed"
+	wait $pids || error "(8) stat failed"
+
+
+	rm -f $wedged
+	do_nodes $mdts "$LCTL set_param fail_loc=0 fail_val=0" > /dev/null
+}
+run_test 81aa "a rename must not cross a lookup under one bucket"
+
+test_81al() {
+	(( MDSCOUNT >= 2 )) || skip_env "needs >= 2 MDTs"
+
+	local mdts=$(comma_list $(mdts_nodes))
+	local fv
+	local fs1
+	local fs2
+	local fd
+	local fk
+	local pid2
+	local pid1
+	local damaged=$TMP/rename_remote_victim.$$
+
+	stack_trap "do_nodes $mdts \"$LCTL set_param fail_loc=0\" > /dev/null"
+	stack_trap "cleanup_81al $damaged"
+
+	# A on MDT0; its entries name files whose objects are on MDT1, so
+	# both renames onto dst are served by MDT1 with A remote
+	mkdir_on_mdt0 $DIR1/$tdir || error "(0) mkdir failed"
+	$LFS mkdir -i 0 $DIR1/$tdir/A || error "(1) mkdir A failed"
+	$LFS mkdir -i 1 $DIR1/$tdir/B || error "(2) mkdir B failed"
+	echo v > $DIR1/$tdir/B/v && echo s1 > $DIR1/$tdir/B/s1 &&
+		echo s2 > $DIR1/$tdir/B/s2 || error "(3) create failed"
+	fv=$($LFS path2fid $DIR1/$tdir/B/v)
+	fs1=$($LFS path2fid $DIR1/$tdir/B/s1)
+	fs2=$($LFS path2fid $DIR1/$tdir/B/s2)
+	mv $DIR1/$tdir/B/v $DIR1/$tdir/A/dst &&
+		ln $DIR1/$tdir/A/dst $DIR1/$tdir/A/keep &&
+		mv $DIR1/$tdir/B/s1 $DIR1/$tdir/A/a &&
+		mv $DIR1/$tdir/B/s2 $DIR1/$tdir/A/b || error "(4) setup failed"
+	stat $DIR1/$tdir/A/{a,b,dst,keep} $DIR2/$tdir/A/{a,b,dst,keep} \
+		> /dev/null || error "(5) stat failed"
+
+	#define OBD_FAIL_MDS_RENAME_TARGET_DELAY 0x240d
+	do_nodes $mdts "$LCTL set_param fail_val=20 fail_loc=0x8000240d" \
+		> /dev/null
+
+	# the second rename resolves dst to v and waits before its children
+	mrename $DIR2/$tdir/A/b $DIR2/$tdir/A/dst > /dev/null 2>&1 &
+	pid2=$!
+	wait_update_facet mds2 "$LCTL get_param -n fail_loc" \
+		"$((0xc000240d))" 30 || error "(6) the rename did not park"
+
+	# the first renames onto dst and finishes while the second waits
+	mrename $DIR1/$tdir/A/a $DIR1/$tdir/A/dst > /dev/null 2>&1 &
+	pid1=$!
+	wait $pid1 || error "(7) first rename failed"
+	wait $pid2 || error "(8) second rename failed"
+
+	touch $damaged
+	cancel_lru_locks mdc
+	fd=$($LFS path2fid $DIR1/$tdir/A/dst 2> /dev/null)
+	fk=$($LFS path2fid $DIR1/$tdir/A/keep 2> /dev/null)
+	[[ "$fk" == "$fv" ]] ||
+		error "(9) keep no longer names $fv"
+	[[ "$fd" == "$fs2" && ! -e $MOUNT/.lustre/fid/$fs1 ]] ||
+		[[ "$fd" == "$fs1" && ! -e $MOUNT/.lustre/fid/$fs2 ]] ||
+		error "(10) dst names $fd with both sources alive"
+	rm -f $damaged
+}
+run_test 81al "a remote same-directory rename must lock its target's name"
+
+test_81an() {
+	local mdts=$(comma_list $(mdts_nodes))
+	local pid1
+	local pid2
+	local fx
+	local fy
+	local waited
+	local wedged=$TMP/rename_hardlink_deadlock.$$
+
+	stack_trap "cleanup_rename_deadlock $wedged"
+
+	# X = d1/10 = d2/2 and Y = d2/10 = d2/11: each rename's target is a
+	# name of the other's source (LU-15491)
+	mkdir_on_mdt0 $DIR1/$tdir || error "(0) mkdir failed"
+	mkdir $DIR1/$tdir/d1 $DIR1/$tdir/d2 || error "(1) mkdir failed"
+	echo x > $DIR1/$tdir/d1/10 && ln $DIR1/$tdir/d1/10 $DIR1/$tdir/d2/2 ||
+		error "(2) X failed"
+	echo y > $DIR1/$tdir/d2/10 && ln $DIR1/$tdir/d2/10 $DIR1/$tdir/d2/11 ||
+		error "(3) Y failed"
+	fx=$($LFS path2fid $DIR1/$tdir/d1/10)
+	fy=$($LFS path2fid $DIR1/$tdir/d2/10)
+	stat $DIR1/$tdir/d1/10 $DIR1/$tdir/d2/{2,10,11} > /dev/null
+	stat $DIR2/$tdir/d1/10 $DIR2/$tdir/d2/{2,10,11} > /dev/null
+
+	touch $wedged
+	#define OBD_FAIL_MDS_RENAME 0x153
+	# both park between their parent locks, before any child lock: a
+	# rename re-looks-up its target, and that lookup would queue behind
+	# the other rename's source lock
+	do_nodes $mdts "$LCTL set_param fail_loc=0x153" > /dev/null
+	mrename $DIR1/$tdir/d1/10 $DIR1/$tdir/d2/10 > /dev/null 2>&1 &
+	pid1=$!
+	mrename $DIR2/$tdir/d2/11 $DIR2/$tdir/d2/2 > /dev/null 2>&1 &
+	pid2=$!
+	sleep 2
+	# switch, never clear: each wakes, takes its source and holds
+	#define OBD_FAIL_MDS_RENAME_CHILD_DELAY 0x2407
+	do_nodes $mdts "$LCTL set_param fail_val=10 fail_loc=0x2407" > /dev/null
+
+	waited=0
+	while (( waited < 60 )) && { kill -0 $pid1 2> /dev/null ||
+				     kill -0 $pid2 2> /dev/null; }; do
+		sleep 1
+		waited=$((waited + 1))
+	done
+	if kill -0 $pid1 2> /dev/null || kill -0 $pid2 2> /dev/null; then
+		error "(4) renames of $fx and $fy deadlocked"
+	fi
+	rm -f $wedged
+	do_nodes $mdts "$LCTL set_param fail_loc=0 fail_val=0" > /dev/null
+}
+run_test 81an "renames between two hard-linked files must not deadlock"
+
 complete_test $SECONDS
 rm -f $SAMPLE_FILE
 check_and_cleanup_lustre
