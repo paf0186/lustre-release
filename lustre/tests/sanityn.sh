@@ -8562,6 +8562,98 @@ test_81al() {
 }
 run_test 81al "a remote same-directory rename must lock its target's name"
 
+test_81am() {
+	(( MDSCOUNT >= 2 )) || skip_env "needs >= 2 MDTs"
+	(( MDS1_VERSION >= $(version_code 2.17.58) )) ||
+		skip "Need MDS version at least 2.17.58"
+
+	local wedged=$TMP/rename_stripe_deadlock.$$
+	local mdts=$(mdts_nodes)
+	local waited
+	local order
+	local idx0
+	local idx1
+	local pidr
+	local pidw
+	local pids
+	local cn
+	local fn
+	local i
+
+	mkdir -p $MOUNT3 && mount_client $MOUNT3 ||
+		skip_env "cannot mount a third client"
+	stack_trap "umount_client $MOUNT3"
+	stack_trap "cleanup_rename_deadlock $wedged"
+
+	# stripes are allocated consecutively from the offset and do not wrap,
+	# so the pair (last, 0) has to be spelled out.  Stripe 0 then has the
+	# higher FID sequence and stripe 1 the lower.
+	test_mkdir $DIR1/$tdir || error "(0) mkdir failed"
+	$LFS setdirstripe -i $((MDSCOUNT - 1)),0 $DIR1/$tdir/M ||
+		error "(1) setdirstripe failed"
+	order=($($LFS getdirstripe $DIR1/$tdir/M | awk '/0x/{print $1}'))
+	idx0=${order[0]}
+	idx1=${order[1]}
+	(( idx1 < idx0 )) || error "(2) stripe1 is not on the lower MDT"
+
+	# an entry lives in the stripe its name hashes to, and a new object is
+	# created on that stripe's MDT, so a throwaway file identifies it
+	for ((i = 0; i < 400; i++)); do
+		touch $DIR1/$tdir/M/p$i || error "(3) touch failed"
+		if [[ $($LFS getstripe -m $DIR1/$tdir/M/p$i) == "$idx1" ]] &&
+		   [[ -z "$cn" ]]; then
+			cn=p$i
+		elif [[ $($LFS getstripe -m $DIR1/$tdir/M/p$i) == "$idx0" ]] &&
+		     [[ -z "$fn" ]]; then
+			fn=p$i
+		fi
+		[[ -n "$cn" && -n "$fn" ]] && break
+		[[ $DIR1/$tdir/M/p$i != $DIR1/$tdir/M/$cn ]] &&
+			[[ $DIR1/$tdir/M/p$i != $DIR1/$tdir/M/$fn ]] &&
+			rm -f $DIR1/$tdir/M/p$i
+	done
+	[[ -n "$cn" && -n "$fn" ]] ||
+		skip_env "no names hash to both stripes"
+	rm -f $DIR1/$tdir/M/$cn
+
+	# C is born on stripe 1's MDT, so it sorts below stripe 0
+	$LFS mkdir -i $idx1 $DIR1/$tdir/C0 || error "(4) mkdir C0 failed"
+	mv $DIR1/$tdir/C0 $DIR1/$tdir/M/$cn || error "(5) mv C failed"
+	touch $DIR1/$tdir/M/$cn/x || error "(5a) touch x failed"
+	ls -d $DIR2/$tdir/M $DIR3/$tdir/M > /dev/null 2>&1
+
+	touch $wedged
+	#define OBD_FAIL_MDS_RENAME 0x153
+	do_nodes $mdts "$LCTL set_param fail_loc=0x80000153" > /dev/null
+
+	# out of C into stripe 0: the rename locks its source C first, as
+	# every release does, and then wants stripe 0
+	mrename $DIR1/$tdir/M/$cn/x $DIR1/$tdir/M/$fn > /dev/null 2>&1 &
+	pidr=$!
+	sleep 1
+	stat $DIR2/$tdir/M/$cn > /dev/null 2>&1 &
+	pidw=$!
+	sleep 1
+	rmdir $DIR3/$tdir/M > /dev/null 2>&1 &
+	pids=$!
+
+	waited=0
+	while (( waited < 90 )) && { kill -0 $pidr 2> /dev/null ||
+				     kill -0 $pidw 2> /dev/null ||
+				     kill -0 $pids 2> /dev/null; }; do
+		sleep 1
+		waited=$((waited + 1))
+	done
+	if kill -0 $pidr 2> /dev/null || kill -0 $pidw 2> /dev/null ||
+	   kill -0 $pids 2> /dev/null; then
+		error "(6) a rename, a lookup and an rmdir deadlocked"
+	fi
+
+	rm -f $wedged
+	do_nodes $mdts "$LCTL set_param fail_loc=0" > /dev/null
+}
+run_test 81am "a rename out of the child must not cross the stripe locker"
+
 test_82() {
 	[[ "$MDS1_VERSION" -gt $(version_code 2.6.91) ]] ||
 		skip "Need MDS version at least 2.6.92"
