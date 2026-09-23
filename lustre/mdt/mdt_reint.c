@@ -2772,14 +2772,14 @@ static int mdt_lock_two_dirs(struct mdt_thread_info *info,
 	if (mfirstdir != mseconddir) {
 		rc = mdt_parent_lock(info, mseconddir, lh_seconddirp,
 				     secondname, LCK_PW);
-	} else if (!mdt_object_remote(mseconddir)) {
-		if (lh_firstdirp->mlh_pdo_hash !=
-		    lh_seconddirp->mlh_pdo_hash) {
-			rc = mdt_object_pdo_lock(info, mseconddir,
-						 lh_seconddirp, secondname,
-						 LCK_PW, false);
-			CFS_FAIL_TIMEOUT(OBD_FAIL_MDS_PDO_LOCK2, 10);
-		}
+	} else if (lh_firstdirp->mlh_pdo_hash != lh_seconddirp->mlh_pdo_hash) {
+		/*
+		 * the destination's bucket too, remote parent or not: nothing
+		 * else keeps the name a rename looked up from changing
+		 */
+		rc = mdt_object_pdo_lock(info, mseconddir, lh_seconddirp,
+					 secondname, LCK_PW, false);
+		CFS_FAIL_TIMEOUT(OBD_FAIL_MDS_PDO_LOCK2, 10);
 	}
 
 	if (rc != 0)
@@ -2946,11 +2946,11 @@ lock_bfl:
 	mdt_lock_pdo_init(lh_srcdirp, LCK_PW, &rr->rr_name);
 	mdt_lock_pdo_init(lh_tgtdirp, LCK_PW, &rr->rr_tgt_name);
 
-	/* In case of same dir local rename we must sort by the hash,
+	/* In case of same dir rename we must sort by the hash,
 	 * otherwise a lock deadlock is possible when renaming
 	 * a to b and b to a at the same time LU-15285
 	 */
-	if (!mdt_object_remote(mtgtdir) && mtgtdir == msrcdir)
+	if (mtgtdir == msrcdir)
 		reverse = lh_srcdirp->mlh_pdo_hash > lh_tgtdirp->mlh_pdo_hash;
 	if (unlikely(CFS_FAIL_PRECHECK(OBD_FAIL_MDS_PDO_LOCK)))
 		reverse = 0;
