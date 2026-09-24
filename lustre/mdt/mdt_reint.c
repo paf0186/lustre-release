@@ -1300,6 +1300,9 @@ static int mdt_reint_unlink(struct mdt_thread_info *info,
 
 	CFS_RACE(OBD_FAIL_MDS_REINT_OPEN);
 	CFS_RACE(OBD_FAIL_MDS_REINT_OPEN2);
+	/* hold before the parent is locked, with nothing held */
+	CFS_FAIL_TIMEOUT(OBD_FAIL_MDS_UNLINK_UNLOCKED_DELAY,
+			 cfs_fail_val ? cfs_fail_val : 20);
 	parent_lh = &info->mti_lh[MDT_LH_PARENT];
 	rc = mdt_parent_lock(info, mp, parent_lh, &rr->rr_name, LCK_PW);
 	if (rc != 0)
