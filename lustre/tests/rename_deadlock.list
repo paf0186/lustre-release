@@ -33,6 +33,7 @@ sanityn		81aj	107	11=W,9=N,10=N		?    ?    W    W      W
 sanityn		81ao	107	11=W,9=N,10=N		W    ?    ?    ?      ?
 sanityn		81w	210	6=W			W    W    W    W      W
 sanityn		81x	213	6=W,2=X			X    -    W    W      W
+# 81z on the series wedges by timing (2 in 3 on 2026-09-24)
 sanityn		81z	212	7=W			-    -    W    W      W
 sanityn		81aa	212	6=W,9=N			-    -    W    W      C
 sanityn		81y	216	7=W,8=E,2=X		X    W    W    W      C
@@ -61,4 +62,5 @@ sanityn		124	506	8=L,9=L,11=L,12=L,7=N	L    L    L    L      L
 # these can leave the cluster needing a restart; they run last
 sanity-hsm	608d	302	7=W			W    W    W    W      W
 replay-single	205a	403	8=W,11=E		?    -    W    W      W
-replay-single	205b	404	6=W,11=E		W    W    W    -      C
+# 205b on master wedges by timing (1 in 3 on 2026-09-24; 0 in 1 before)
+replay-single	205b	404	6=W,11=E		W    W    W    W      C
