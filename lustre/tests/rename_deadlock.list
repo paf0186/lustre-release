@@ -53,6 +53,10 @@ sanity-hsm	608e	214	6=W			-    -    -    W      W
 replay-single	205c	502	8=L			L    L    L    L      L
 replay-single	205e	502	8=L,9=E			?    ?    ?    L      L
 replay-single	205d	406	9=E,10=L		-    -    -    -      -
+# 506 is not a lock order entry: rmdir or unlink of a name whose type
+# changed after the client checked it; the fix exempts foreign
+# directories, which stay open
+sanityn		124	506	8=L,9=L,11=L,12=L,7=N	L    L    L    L      L
 # these can leave the cluster needing a restart; they run last
 sanity-hsm	608d	302	7=W			W    W    W    W      W
 replay-single	205a	403	8=W,11=E		?    -    W    W      W
