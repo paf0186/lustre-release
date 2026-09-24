@@ -10151,6 +10151,75 @@ log "cleanup: ======================================================"
 [ "$(mount | grep $MOUNT2)" ] && wait_update $HOSTNAME "fuser -m $MOUNT2" "" ||
 	true
 
+# hold $op on the MDT before its parent lock while $DIR2 replaces the
+# name with an object of the other type
+test_124_swap() {
+	local op=$1
+	local expect=$2
+	local name=$tdir/$tfile-$op
+	local err=$TMP/$tfile-$op.err
+	local hold=10
+	local fid pid rc fl i
+
+	if [[ $op == rmdir ]]; then
+		$LFS mkdir -i 0 $DIR1/$name || error "(0) mkdir $name failed"
+	else
+		echo $op > $DIR1/$name || error "(1) create $name failed"
+	fi
+	stack_trap "rm -f $err"
+
+	#define OBD_FAIL_MDS_UNLINK_UNLOCKED_DELAY	0x240f
+	do_facet mds1 $LCTL set_param fail_val=$hold fail_loc=0x8000240f
+	$op $DIR1/$name 2> $err &
+	pid=$!
+	for ((i = 0; i < hold * 10; i++)); do
+		fl=$(do_facet mds1 $LCTL get_param -n fail_loc)
+		(( fl & 0x40000000 )) && break
+		kill -0 $pid 2> /dev/null || break
+		sleep 0.1
+	done
+	if ! (( fl & 0x40000000 )); then
+		wait $pid
+		skip "MDS lacks fail_loc 0x240f"
+	fi
+
+	if [[ $op == rmdir ]]; then
+		rmdir $DIR2/$name || error "(2) rmdir $DIR2/$name failed"
+		echo $op > $DIR2/$name || error "(3) create $DIR2/$name failed"
+	else
+		unlink $DIR2/$name || error "(4) unlink $DIR2/$name failed"
+		$LFS mkdir -i 0 $DIR2/$name ||
+			error "(5) mkdir $DIR2/$name failed"
+	fi
+	fid=$($LFS path2fid $DIR2/$name) || error "(6) path2fid failed"
+	kill -0 $pid 2> /dev/null || error "(7) $op returned before the swap"
+
+	wait $pid
+	rc=$?
+	cancel_lru_locks mdc
+	[[ "$($LFS path2fid $DIR1/$name 2>&1)" == "$fid" ]] ||
+		error "(8) $op returned $rc and removed $fid made by $DIR2"
+	(( rc != 0 )) || error "(9) $op of the replaced $name returned 0"
+	grep -q "$expect" $err ||
+		error "(10) $op failed with '$(< $err)', not '$expect'"
+	if [[ $op == rmdir ]]; then
+		[[ "$(< $DIR1/$name)" == "$op" ]] ||
+			error "(11) $name data lost"
+	else
+		[[ -d $DIR1/$name ]] || error "(12) $name is not a directory"
+	fi
+}
+
+test_124() {
+	remote_mds_nodsh && skip "remote MDS with nodsh"
+
+	mkdir_on_mdt0 $DIR1/$tdir || error "mkdir $tdir failed"
+	stack_trap "do_facet mds1 $LCTL set_param fail_loc=0 fail_val=0"
+	test_124_swap rmdir "Not a directory"
+	test_124_swap unlink "Is a directory"
+}
+run_test 124 "rmdir and unlink refuse a name replaced by the other type"
+
 complete_test $SECONDS
 rm -f $SAMPLE_FILE
 check_and_cleanup_lustre
