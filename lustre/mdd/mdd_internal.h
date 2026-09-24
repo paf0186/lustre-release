@@ -255,7 +255,8 @@ int mdd_may_delete(const struct lu_env *env, struct mdd_object *tpobj,
 int mdd_unlink_sanity_check(const struct lu_env *env, struct mdd_object *pobj,
 			    const struct lu_attr *pattr,
 			    struct mdd_object *cobj,
-			    const struct lu_attr *cattr);
+			    const struct lu_attr *cattr,
+			    const struct md_attr *ma);
 int mdd_finish_unlink(const struct lu_env *env, struct mdd_object *obj,
 		      struct md_attr *ma, struct mdd_object *pobj,
 		      const struct lu_name *lname, struct thandle *th);

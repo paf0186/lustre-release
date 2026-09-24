@@ -568,7 +568,6 @@ int mdd_may_delete(const struct lu_env *env, struct mdd_object *tpobj,
 	if (tattr->la_flags & (LUSTRE_APPEND_FL | LUSTRE_IMMUTABLE_FL))
 		RETURN(-EPERM);
 
-	/* additional check the rename case */
 	if (cattr) {
 		if (S_ISDIR(cattr->la_mode)) {
 			if (!S_ISDIR(tattr->la_mode))
@@ -2052,6 +2051,24 @@ int mdd_finish_unlink(const struct lu_env *env,
 	RETURN(rc);
 }
 
+static bool mdd_dir_is_foreign(const struct lu_env *env,
+			       struct mdd_object *obj)
+{
+	struct lu_buf buf = LU_BUF_NULL;
+	struct lmv_foreign_md *lfm;
+	bool foreign;
+
+	if (mdd_stripe_get(env, obj, &buf, XATTR_NAME_LMV) < 0)
+		return false;
+
+	lfm = buf.lb_buf;
+	foreign = buf.lb_len >= sizeof(lfm->lfm_magic) &&
+		  le32_to_cpu(lfm->lfm_magic) == LMV_MAGIC_FOREIGN;
+	lu_buf_free(&buf);
+
+	return foreign;
+}
+
 /*
  * pobj maybe NULL
  * has mdd_write_lock on cobj already, but not on pobj yet
@@ -2059,13 +2076,24 @@ int mdd_finish_unlink(const struct lu_env *env,
 int mdd_unlink_sanity_check(const struct lu_env *env, struct mdd_object *pobj,
 			    const struct lu_attr *pattr,
 			    struct mdd_object *cobj,
-			    const struct lu_attr *cattr)
+			    const struct lu_attr *cattr,
+			    const struct md_attr *ma)
 {
+	const struct lu_attr *type = NULL;
 	int rc;
 
 	ENTRY;
 
-	rc = mdd_may_delete(env, pobj, pattr, cobj, cattr, NULL, 1, 1);
+	/* the client's type: S_IFDIR for rmdir, 0 for unlink */
+	if (ma->ma_attr.la_valid & LA_MODE)
+		type = &ma->ma_attr;
+
+	/* foreign_symlink clients unlink a foreign directory as a file */
+	if (type && cobj && !S_ISDIR(type->la_mode) &&
+	    S_ISDIR(cattr->la_mode) && mdd_dir_is_foreign(env, cobj))
+		type = NULL;
+
+	rc = mdd_may_delete(env, pobj, pattr, cobj, cattr, type, 1, 1);
 
 	RETURN(rc);
 }
@@ -2217,7 +2245,8 @@ static int mdd_unlink(const struct lu_env *env, struct md_object *pobj,
 			cl_flags |= CLF_UNLINK_HSM_EXISTS;
 	}
 
-	rc = mdd_unlink_sanity_check(env, mdd_pobj, pattr, mdd_cobj, cattr);
+	rc = mdd_unlink_sanity_check(env, mdd_pobj, pattr, mdd_cobj, cattr,
+				     ma);
 	if (rc)
 		RETURN(rc);
 
