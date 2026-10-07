@@ -37951,7 +37951,8 @@ test_901() {
 	old=$((old * 4))
 	oldc=0
 	count=0
-	while [ $old -ne $oldc ]; do
+	# targets on this node share the MGC and hold locks of their own
+	while (( oldc < old )); do
 		oldc=$($LCTL get_param -n 'ldlm.namespaces.MGC*.lock_count')
 		sleep 1
 		((count++))
