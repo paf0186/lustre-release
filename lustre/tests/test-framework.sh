@@ -1592,8 +1592,10 @@ init_gss() {
 	fi
 
 	if $GSS_SK && $SK_NO_KEY; then
-		local numclients=${1:-$CLIENTCOUNT}
 		local clients=${CLIENTS:-$HOSTNAME}
+		# setup runs this before init_clients_lists() sets CLIENTCOUNT
+		local numclients=${1:-${CLIENTCOUNT:-$(echo ${clients//,/ } |
+						      wc -w)}}
 		local nodes=$(all_nodes)
 
 		# security ctx config for keyring
@@ -6107,7 +6109,7 @@ setupall() {
 				export SK_SKIPFIRST=false
 
 				sleep 30
-				do_nodes $CLIENTS \
+				do_nodes ${CLIENTS:-$HOSTNAME} \
 					 "lctl set_param osc.*.idle_connect=1"
 				return
 			else
