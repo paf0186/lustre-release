@@ -2633,7 +2633,8 @@ dm_cleanup_dev() {
 	local major
 	local minor
 
-	is_dm_dev $facet $dm_dev || return 0
+	# a mapper removed elsewhere must still not be left in ${facet}_dev
+	is_dm_dev $facet $dm_dev || { unexport_dm_dev $facet; return 0; }
 
 	read major minor <<< $(do_facet $facet "$DMSETUP table $dm_dev" |
 		awk '{ print $4 }' | awk -F: '{ print $1" "$2 }')
@@ -2672,6 +2673,9 @@ mount_facet() {
 
 	case $fstype in
 	ldiskfs)
+		# a stop in another shell ("stop mds1 &") removed the mapper
+		[[ ${!dev} != $(dm_facet_devpath $facet) ]] ||
+			is_dm_dev $facet ${!dev} || unexport_dm_dev $facet
 		if dm_flakey_supported $facet; then
 			dm_dev=$(dm_create_dev $facet ${!dev})
 			[[ -n "$dm_dev" ]] || dm_dev=${!dev}
