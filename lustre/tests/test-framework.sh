@@ -2586,6 +2586,9 @@ export_dm_dev() {
 	local dev_name=${dev_alias}_dev
 	local dev=${!dev_name}
 
+	# already exported: saving again would record the mapper as the raw dev
+	[[ $dev != $dm_dev ]] || return 0
+
 	if [[ $active_facet = $facet ]]; then
 		local failover_dev=${dev_alias}failover_dev
 		if [[ ${!failover_dev} = $dev ]]; then
@@ -6186,6 +6189,16 @@ init_facet_vars () {
 		eval export ${facet}failover_dev=${!varname}
 	else
 		eval export ${facet}failover_dev=$device
+	fi
+
+	# a target mounted by another process (llmount.sh, an earlier suite)
+	# through its dm-flakey mapper: use that, as mount_facet() would have
+	local dm_dev=$(dm_facet_devpath $facet)
+
+	if [[ $(facet_fstype $facet) == ldiskfs ]] &&
+	   ! { [[ $facet == mgs ]] && combined_mgs_mds; } &&
+	   dm_flakey_supported $facet && is_dm_dev $facet $dm_dev; then
+		export_dm_dev $facet $dm_dev
 	fi
 
 	# get mount point of already mounted device
