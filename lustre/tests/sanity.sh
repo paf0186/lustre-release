@@ -28674,6 +28674,8 @@ test_255b() {
 
 	#force write to complete before dropping OST cache & checking memory
 	sync
+	# the client's pages count in Cached when it shares the OSS's node
+	cancel_lru_locks osc
 
 	local total=$(facet_meminfo ost1 MemTotal)
 	echo "Total memory: $total KiB"
