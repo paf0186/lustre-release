@@ -1293,6 +1293,8 @@ run_test 16 "Initial OI scrub can rebuild crashed index objects"
 
 test_17a() {
 	[ "$mds1_FSTYPE" != "ldiskfs" ] && skip_env "ldiskfs only test"
+	[[ $(facet_active_host mds1) != $(facet_active_host ost1) ]] ||
+		skip "MDS shares a node with OSTs, which may take the fail_loc"
 
 #define OBD_FAIL_OSD_OI_ENOSPC				0x19d
 	do_facet mds1 $LCTL set_param fail_loc=0x8000019d
