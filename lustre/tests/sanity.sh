@@ -38,7 +38,6 @@ init_logging
 
 ALWAYS_EXCEPT="$SANITY_EXCEPT "
 always_except LU-9693  42a 42c
-always_except LU-6493  42b
 always_except LU-16515 118c 118d
 always_except LU-8411  407
 always_except LU-18032 119i
@@ -49,10 +48,6 @@ if $SHARED_KEY; then
 	always_except LU-17127 39o
 fi
 
-# skip nfs tests on kernels >= 4.12.0 until they are fixed
-if [ $LINUX_VERSION_CODE -ge $(version_code 4.12.0) ]; then
-	always_except LU-12661 817
-fi
 # skip cgroup tests on RHEL8.1 kernels until they are fixed
 if (( $LINUX_VERSION_CODE >= $(version_code 4.18.0) &&
       $LINUX_VERSION_CODE <  $(version_code 5.4.0) )); then

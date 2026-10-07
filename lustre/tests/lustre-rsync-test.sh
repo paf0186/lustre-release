@@ -17,7 +17,6 @@ init_logging
 LREPL_LOG=$TMP/lustre_rsync.log
 
 ALWAYS_EXCEPT="$LRSYNC_EXCEPT "
-always_except LU-4256	2b
 
 build_test_filter
 
