@@ -7414,7 +7414,8 @@ test_56c() {
 	local degraded="obdfilter.$ost_name.degraded"
 	save_lustre_params ost1 $degraded > $p
 	do_facet ost1 $LCTL set_param -n $degraded=1
-	stack_trap "restore_lustre_params < $p; rm -f $p"
+	# the next test must not find OST0 still no_precreate in the MDT's view
+	stack_trap "restore_lustre_params < $p; rm -f $p; sleep_maxage"
 
 	if (( $OST1_VERSION >= $(version_code 2.12.55) )); then
 		local no_precreate="obdfilter.$ost_name.no_precreate"
