@@ -1605,6 +1605,8 @@ run_test 58c "resend/reconstruct setxattr op"
 # bug 11658
 test_59() {
 	remote_ost_nodsh && skip "remote OST with nodsh" && return 0
+	[[ $(facet_active_host mds1) != $(facet_active_host ost1) ]] ||
+		skip "the OST recovery delay would hold up MDS recovery too"
 
 	mkdir_on_mdt0 $DIR/$tdir || error "mkdir $DIR/$tdir failed"
 	createmany -o $DIR/$tdir/$tfile-%d 200 ||
