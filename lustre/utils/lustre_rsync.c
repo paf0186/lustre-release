@@ -1289,7 +1289,7 @@ int lr_write_log(void)
 
 	lr_backup_log();
 
-	fd = open(statuslog, O_WRONLY | O_CREAT | O_SYNC, S_IRUSR | S_IWUSR);
+	fd = open(statuslog, O_WRONLY | O_CREAT, 0600);
 	if (fd == -1) {
 		fprintf(stderr, "Error opening log file for writing (%s)\n",
 			statuslog);
@@ -1312,6 +1312,11 @@ int lr_write_log(void)
 			rc = -1;
 			break;
 		}
+	}
+	if (!rc && fsync(fd)) {
+		fprintf(stderr, "Error syncing log file (%s) %d\n",
+			statuslog, errno);
+		rc = -1;
 	}
 	close(fd);
 	return rc;
