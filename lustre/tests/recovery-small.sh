@@ -3482,8 +3482,17 @@ test_150() {
 	stack_trap "start mds1 $(mdsdevname 1) $MDS_MOUNT_OPTS && \
 		wait_recovery_complete mds1 && clients_up && true" EXIT
 
-	df $MOUNT || error "statfs failed"
-	return 0
+	# not df: it also stats the mount point, which needs MDT0 unless
+	# the client still holds a lock on the root
+	stat -f $MOUNT &
+	local pid=$!
+	local end=$((SECONDS + 60))
+
+	while kill -0 $pid 2>/dev/null; do
+		(( SECONDS < end )) || error "statfs blocked with MDT0 stopped"
+		sleep 1
+	done
+	wait $pid || error "statfs failed"
 }
 run_test 150 "statfs when MDT0 offline with lazystatfs option"
 
