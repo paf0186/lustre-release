@@ -30681,7 +30681,7 @@ test_300l() {
 	do_facet mds2 $LCTL set_param mdt.*MDT0001.enable_remote_dir_gid=-1
 	stack_trap "do_facet mds2 $LCTL set_param mdt.*MDT0001.enable_remote_dir_gid=0"
 	#define OBD_FAIL_MDS_STALE_DIR_LAYOUT	 0x158
-	$LCTL set_param fail_loc=0x80000158
+	do_facet mds2 $LCTL set_param fail_loc=0x80000158
 	$RUNAS mkdir $DIR/$tdir/striped_dir/test_dir || error "create dir fails"
 
 	stripe_index=$($LFS getdirstripe -i $DIR/$tdir/striped_dir/test_dir)
