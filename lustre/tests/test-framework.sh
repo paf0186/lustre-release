@@ -3093,9 +3093,10 @@ zconf_umount() {
 	[ $running -eq 0 ] && return 0
 
 	echo "Stopping client $client $mnt (opts:$force)"
-	do_node $client lsof -t $mnt || need_kill=no
+	# lsof stats the mount, which blocks forever if its MDT is gone
+	do_node $client timeout 60 lsof -t $mnt || need_kill=no
 	if [ "x$force" != "x" ] && [ "x$need_kill" != "xno" ]; then
-		pids=$(do_node $client lsof -t $mnt | sort -u);
+		pids=$(do_node $client timeout 60 lsof -t $mnt | sort -u);
 		if [ -n "$pids" ]; then
 			do_node $client kill -9 $pids || true
 		fi
@@ -3265,9 +3266,9 @@ zconf_umount_clients() {
 	do_nodes $clients "running=\\\$(grep -c $mnt' ' /proc/mounts);
 if [ \\\$running -ne 0 ] ; then
 echo Stopping client \\\$(hostname) $mnt opts:$force;
-lsof $mnt || need_kill=no;
+timeout 60 lsof $mnt || need_kill=no;
 if [ "x$force" != "x" -a "x\\\$need_kill" != "xno" ]; then
-	pids=\\\$(lsof -t $mnt | sort -u);
+	pids=\\\$(timeout 60 lsof -t $mnt | sort -u);
 	if [ -n \\\"\\\$pids\\\" ]; then
 		kill -9 \\\$pids;
 	fi
