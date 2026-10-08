@@ -8422,15 +8422,13 @@ remote_nodes_list () {
 
 # Get all of the MDS nodes, including active and passive nodes.
 all_mdts_nodes () {
-	local host
 	local failover_host
 	local nodes
 	local i
 
 	for ((i=1; i <= $MDSCOUNT; i++)); do
-		host=mds${i}_HOST
 		failover_host=mds${i}failover_HOST
-		nodes="$nodes ${!host} ${!failover_host}"
+		nodes="$nodes $(facet_host mds$i) ${!failover_host}"
 	done
 
 	comma_list $nodes
@@ -8438,15 +8436,13 @@ all_mdts_nodes () {
 
 # Get all of the OSS nodes, including active and passive nodes.
 all_osts_nodes() {
-	local host
 	local failover_host
 	local nodes=""
 	local i
 
 	for ((i = 1; i <= $OSTCOUNT; i++)); do
-		host=ost${i}_HOST
 		failover_host=ost${i}failover_HOST
-		nodes="$nodes ${!host} ${!failover_host}"
+		nodes="$nodes $(facet_host ost$i) ${!failover_host}"
 	done
 
 	comma_list $nodes
