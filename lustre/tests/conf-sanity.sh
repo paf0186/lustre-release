@@ -31,12 +31,6 @@ fi
 #                                     8  22  40 165  (min)
 [ "$SLOW" = "no" ] && EXCEPT_SLOW="45 69 106 111 114"
 
-if [[ "$mds1_FSTYPE" == "zfs" ]]; then
-	always_except LU-18652 112a 112b 113 117 119 121 122a
-	always_except LU-18652 123aa 123ab 123ac 123ad 123ae 123af 123ag 123ah 123ahi
-	always_except LU-18652 123F 123G 123H 126 129 132 133 135 136 137 150 152 153a 153b 153c 155 802a
-fi
-
 build_test_filter
 
 # use small MDS + OST size to speed formatting time
@@ -11533,13 +11527,16 @@ test_133() {
 	test_mkdir -p $DIR/$tdir || error "failed to mkdir $DIR/$tdir"
 	# Consume space on the OSTs in the pool so they are unbalanced with the
 	# OST outside of the pool
-	# fill each OST 90% with fallocate so they are widely
-	# imbalanced
-	local size=$(((MINV * 9 / 10) * 1024))
+	# fill each OST so they are widely imbalanced; on ZFS a write cannot
+	# come as close to full as fallocate does on ldiskfs
+	local pct=90
+	[[ $ost1_FSTYPE != zfs ]] || pct=75
+	local size=$(((MINV * pct / 100) * 1024))
 	for ((i = 0; i <= poolostrange; i++)); do
-		$LFS setstripe -c 1 -i $i $testfile$i ||
-			error "failed to setstripe $testfile$i"
-		fallocate -l $size $testfile$i || error "fallocate failed"
+		$LFS setstripe -c 1 -i $i $testfile$i-0 ||
+			error "failed to setstripe $testfile$i-0"
+		fast_file_write $testfile$i $size ||
+			error "failed to fill $testfile$i-0"
 	done
 	ls -la $DIR/$tdir
 	sleep_maxage
