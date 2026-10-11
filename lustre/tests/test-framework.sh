@@ -12654,6 +12654,7 @@ function fast_file_write()
 	local file=$1
 	local size=$2
 	local count=${3:-1}
+	local i
 
 	if check_fallocate_supported $ost1 >/dev/null; then
 		for ((i=0; i<$count; i++)); do
