@@ -3792,36 +3792,51 @@ test_36() { # 12743
 	sleep 5 # until 11778 fixed
 
 	dd if=/dev/zero of=$MOUNT2/$tfile bs=1M count=7 || error "dd failed"
-
-	BKTOTAL=$($LCTL get_param -n obdfilter.*.kbytestotal |
-		  awk 'BEGIN{total=0}; {total+=$1}; END{print total}')
-	BKFREE=$($LCTL get_param -n obdfilter.*.kbytesfree |
-		 awk 'BEGIN{free=0}; {free+=$1}; END{print free}')
-	BKAVAIL=$($LCTL get_param -n obdfilter.*.kbytesavail |
-		  awk 'BEGIN{avail=0}; {avail+=$1}; END{print avail}')
-	STRING=$(df -P $MOUNT2 | tail -n 1 | awk '{print $2","$3","$4}')
-	DFTOTAL=$(echo $STRING | cut -d, -f1)
-	DFUSED=$(echo $STRING  | cut -d, -f2)
-	DFAVAIL=$(echo $STRING | cut -d, -f3)
-	DFFREE=$(($DFTOTAL - $DFUSED))
+	sync
 
 	ALLOWANCE=$((64 * $OSTCOUNT))
 
-	if [ $DFTOTAL -lt $(($BKTOTAL - $ALLOWANCE)) ] ||
-	   [ $DFTOTAL -gt $(($BKTOTAL + $ALLOWANCE)) ] ; then
-		echo "**** FAIL: df total($DFTOTAL) mismatch OST total($BKTOTAL)"
-		rc=1
-	fi
-	if [ $DFFREE -lt $(($BKFREE - $ALLOWANCE)) ] ||
-	   [ $DFFREE -gt $(($BKFREE + $ALLOWANCE)) ] ; then
-		echo "**** FAIL: df free($DFFREE) mismatch OST free($BKFREE)"
-		rc=2
-	fi
-	if [ $DFAVAIL -lt $(($BKAVAIL - $ALLOWANCE)) ] ||
-	   [ $DFAVAIL -gt $(($BKAVAIL + $ALLOWANCE)) ] ; then
-		echo "**** FAIL: df avail($DFAVAIL) mismatch OST avail($BKAVAIL)"
-		rc=3
-	fi
+	# ZFS accounts for the write as its transaction groups commit, and
+	# df reads the client's cached statfs, so give it time to settle
+	local tries=1
+	local i
+	[[ $(facet_fstype ost1) != zfs ]] || tries=20
+	local msg
+
+	for ((i = 0; i < tries; i++)); do
+		(( i == 0 )) || sleep 1
+		BKTOTAL=$($LCTL get_param -n obdfilter.*.kbytestotal |
+			  awk 'BEGIN{total=0}; {total+=$1}; END{print total}')
+		BKFREE=$($LCTL get_param -n obdfilter.*.kbytesfree |
+			 awk 'BEGIN{free=0}; {free+=$1}; END{print free}')
+		BKAVAIL=$($LCTL get_param -n obdfilter.*.kbytesavail |
+			  awk 'BEGIN{avail=0}; {avail+=$1}; END{print avail}')
+		STRING=$(df -P $MOUNT2 | tail -n 1 |
+			 awk '{print $2","$3","$4}')
+		DFTOTAL=$(echo $STRING | cut -d, -f1)
+		DFUSED=$(echo $STRING  | cut -d, -f2)
+		DFAVAIL=$(echo $STRING | cut -d, -f3)
+		DFFREE=$(($DFTOTAL - $DFUSED))
+
+		rc=0
+		if [ $DFTOTAL -lt $(($BKTOTAL - $ALLOWANCE)) ] ||
+		   [ $DFTOTAL -gt $(($BKTOTAL + $ALLOWANCE)) ] ; then
+			msg="df total($DFTOTAL) mismatch OST total($BKTOTAL)"
+			rc=1
+		fi
+		if [ $DFFREE -lt $(($BKFREE - $ALLOWANCE)) ] ||
+		   [ $DFFREE -gt $(($BKFREE + $ALLOWANCE)) ] ; then
+			msg="df free($DFFREE) mismatch OST free($BKFREE)"
+			rc=2
+		fi
+		if [ $DFAVAIL -lt $(($BKAVAIL - $ALLOWANCE)) ] ||
+		   [ $DFAVAIL -gt $(($BKAVAIL + $ALLOWANCE)) ] ; then
+			msg="df avail($DFAVAIL) mismatch OST avail($BKAVAIL)"
+			rc=3
+		fi
+		(( rc == 0 )) && break
+	done
+	(( rc == 0 )) || echo "**** FAIL: $msg"
 
 	$UMOUNT $MOUNT2
 	stop fs3ost -f || error "unable to stop OST3"
