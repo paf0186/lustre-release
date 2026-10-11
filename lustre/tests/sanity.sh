@@ -7077,16 +7077,10 @@ test_54b() {
 run_test 54b "char device works in lustre ======================"
 
 find_loop_dev() {
-	[ -b /dev/loop/0 ] && LOOPBASE=/dev/loop/
-	[ -b /dev/loop0 ] && LOOPBASE=/dev/loop
-	[ -z "$LOOPBASE" ] && echo "/dev/loop/0 and /dev/loop0 gone?" && return
-
-	for i in $(seq 3 7); do
-		losetup $LOOPBASE$i > /dev/null 2>&1 && continue
-		LOOPDEV=$LOOPBASE$i
-		LOOPNUM=$i
-		break
-	done
+	# loop devices exist only once asked for through /dev/loop-control
+	LOOPDEV=$(losetup -f 2> /dev/null)
+	[[ -n "$LOOPDEV" ]] || { echo "no free loop device"; return; }
+	LOOPNUM=${LOOPDEV##*loop}
 }
 
 cleanup_54c() {
