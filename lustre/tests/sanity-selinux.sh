@@ -72,6 +72,13 @@ check_selinux_xattr() {
 	local mds=$1
 	local mds_path=$2
 	local mntpt="/tmp/mdt_"
+	local zfs=false
+
+	# a ZFS dataset cannot be mounted while its target holds it
+	if [[ $(facet_fstype $mds) == zfs ]]; then
+		zfs=true
+		stop $mds >&2 || error "stop $mds failed"
+	fi
 
 	do_facet $mds mkdir -p $mntpt || error "mkdir $mntpt failed"
 	mount_fstype $mds $mntpt  || error "mount $mds failed"
@@ -82,6 +89,12 @@ check_selinux_xattr() {
 
 	unmount_fstype $mds $mntpt || error "umount $mds failed"
 	do_facet $mds rmdir $mntpt || error "rmdir $mntpt failed"
+
+	if $zfs; then
+		start $mds $(facet_device $mds) $MDS_MOUNT_OPTS >&2 ||
+			error "start $mds failed"
+		clients_up >&2 || error "clients_up failed"
+	fi
 
 	echo $xattrval
 }
